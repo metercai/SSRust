@@ -1,7 +1,10 @@
 name: Build Nightly Releases
 on:
   push:
-    branches: [master]
+    tags:
+      - v*
+#      push:
+#    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
