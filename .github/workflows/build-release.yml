@@ -1,8 +1,11 @@
 name: Build Releases
 on:
   push:
-    tags:
-      - v*
+    paths:
+      - '**/*-ssrust.version'
+#push:
+#    tags:
+#      - v*
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,7 +46,9 @@ jobs:
           override: true
 
       - name: Install cross
-        run: cargo install cross
+        run: |
+          echo "SSRust_VERSION=v$(cat build-ssrust.version)-dns" >> $GITHUB_ENV
+          cargo install cross
 
       - name: Build ${{ matrix.target }}
         timeout-minutes: 120
@@ -51,7 +56,7 @@ jobs:
           compile_target=${{ matrix.target }}
 
           if [[ "$compile_target" == *"-linux-"* || "$compile_target" == *"-apple-"* ]]; then
-            compile_features="-f local-redir -f local-tun"
+            compile_features="-f local-redir -f local-tun -f local-dns"
           fi
 
           if [[ "$compile_target" == "mips-"* || "$compile_target" == "mipsel-"* || "$compile_target" == "mips64-"* || "$compile_target" == "mips64el-"* ]]; then
@@ -74,12 +79,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: build/release/*
-          prerelease: ${{ contains(github.ref, '-') }}
+          tag_name: ${{ env.SSRust_VERSION }}
 
   build-unix:
     runs-on: ${{ matrix.os }}
     env:
-      BUILD_EXTRA_FEATURES: "local-redir local-tun armv8 neon"
+      BUILD_EXTRA_FEATURES: "local-redir local-tun local-dns armv8 neon"
       RUST_BACKTRACE: full
       RUSTFLAGS: "-C strip=symbols"
     strategy:
@@ -125,7 +130,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: build/release/*
-          prerelease: ${{ contains(github.ref, '-') }}
+          tag_name: ${{ env.SSRust_VERSION }}
 
   build-windows:
     runs-on: windows-latest
@@ -153,4 +158,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: build/release/*
-          prerelease: ${{ contains(github.ref, '-') }}
+          tag_name: ${{ env.SSRust_VERSION }}
