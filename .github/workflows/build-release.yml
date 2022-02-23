@@ -9,7 +9,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SSRust_VERSION: v1.13.1-dns
 
 jobs:
   build-cross:
@@ -47,7 +46,9 @@ jobs:
           override: true
 
       - name: Install cross
-        run: cargo install cross
+        run: |
+          echo "SSRust_VERSION=v$(cat build-ssrust.version)-dns" >> $GITHUB_ENV
+          cargo install cross
 
       - name: Build ${{ matrix.target }}
         timeout-minutes: 120
