@@ -113,7 +113,7 @@ pub fn define_command_line_options(mut app: App<'_>) -> App<'_> {
             .long("plugin")
             .takes_value(true)
             .requires("SERVER_ADDR")
-            .help("SIP003 (https://shadowsocks.org/en/spec/Plugin.html) plugin"),
+            .help("SIP003 (https://shadowsocks.org/en/wiki/Plugin.html) plugin"),
     )
     .arg(
         Arg::new("PLUGIN_OPT")
@@ -210,6 +210,17 @@ pub fn define_command_line_options(mut app: App<'_>) -> App<'_> {
                 .takes_value(true)
                 .validator(validator::validate_u32)
                 .help("Set SO_MARK option for outbound sockets"),
+        );
+    }
+
+    #[cfg(target_os = "freebsd")]
+    {
+        app = app.arg(
+            Arg::new("OUTBOUND_USER_COOKIE")
+                .long("outbound-user-cookie")
+                .takes_value(true)
+                .validator(validator::validate_u32)
+                .help("Set SO_USER_COOKIE option for outbound sockets"),
         );
     }
 
@@ -633,6 +644,13 @@ pub fn main(matches: &ArgMatches) {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         match matches.value_of_t::<u32>("OUTBOUND_FWMARK") {
             Ok(mark) => config.outbound_fwmark = Some(mark),
+            Err(ref err) if err.kind == ClapErrorKind::ArgumentNotFound => {}
+            Err(err) => err.exit(),
+        }
+
+        #[cfg(target_os = "freebsd")]
+        match matches.value_of_t::<u32>("OUTBOUND_USER_COOKIE") {
+            Ok(user_cookie) => config.outbound_user_cookie = Some(user_cookie),
             Err(ref err) if err.kind == ClapErrorKind::ArgumentNotFound => {}
             Err(err) => err.exit(),
         }
