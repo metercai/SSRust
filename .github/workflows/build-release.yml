@@ -122,6 +122,7 @@ jobs:
       - name: Build release
         shell: bash
         run: |
+          echo "SSRust_VERSION=v$(cat build-ssrust.version)-dns" >> $GITHUB_ENV
           ./build/build-host-release -t ${{ matrix.target }}
 
       - name: Upload Github Assets
@@ -150,6 +151,7 @@ jobs:
 
       - name: Build release
         run: |
+          echo "SSRust_VERSION=v$(cat build-ssrust.version)-dns" >> $GITHUB_ENV
           pwsh ./build/build-host-release.ps1
 
       - name: Upload Github Assets
