@@ -170,7 +170,7 @@ impl Dns {
                 }
             };
 
-            debug!("DNS resolve: tcp - {} - {:?} - {}", peer_addr, message.queries()[0].query_type(), message.queries()[0].name());
+//            debug!("DNS resolve: tcp - {} - {:?} - {}", peer_addr, message.queries()[0].query_type(), message.queries()[0].name());
 
             let respond_message = match client.resolve(message, &local_addr, &remote_addr).await {
                 Ok(m) => m,
@@ -256,7 +256,7 @@ impl Dns {
         remote_addr: Arc<Address>,
     ) -> io::Result<()> {
 
-        debug!("DNS resolve: udp - {} - {:?} - {}", peer_addr, message.queries()[0].query_type(), message.queries()[0].name());
+//        debug!("DNS resolve: udp - {} - {:?} - {}", peer_addr, message.queries()[0].query_type(), message.queries()[0].name());
 
         let respond_message = match client.resolve(message, &local_addr, &remote_addr).await {
             Ok(m) => m,
