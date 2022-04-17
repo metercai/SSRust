@@ -75,6 +75,8 @@ use trust_dns_resolver::config::{NameServerConfig, Protocol, ResolverConfig};
 use crate::acl::AccessControl;
 #[cfg(feature = "local-dns")]
 use crate::local::dns::NameServerAddr;
+#[cfg(feature = "local")]
+use crate::local::socks::config::Socks5AuthConfig;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -246,6 +248,11 @@ struct SSLocalExtConfig {
     #[cfg(feature = "local-tun")]
     #[serde(skip_serializing_if = "Option::is_none")]
     tun_interface_address: Option<String>,
+
+    /// SOCKS5
+    #[cfg(feature = "local")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socks5_auth_config_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -823,6 +830,10 @@ pub struct LocalConfig {
 
     /// Set `IPV6_V6ONLY` for listener socket
     pub ipv6_only: bool,
+
+    /// SOCKS5 Authentication configuration
+    #[cfg(feature = "local")]
+    pub socks5_auth: Socks5AuthConfig,
 }
 
 impl LocalConfig {
@@ -859,6 +870,9 @@ impl LocalConfig {
             tun_device_fd_from_path: None,
 
             ipv6_only: false,
+
+            #[cfg(feature = "local")]
+            socks5_auth: Socks5AuthConfig::default(),
         }
     }
 
@@ -1420,6 +1434,11 @@ impl Config {
                             local_config.tun_interface_name = Some(tun_interface_name);
                         }
 
+                        #[cfg(feature = "local")]
+                        if let Some(socks5_auth_config_path) = local.socks5_auth_config_path {
+                            local_config.socks5_auth = Socks5AuthConfig::load_from_file(&socks5_auth_config_path)?;
+                        }
+
                         nconfig.local.push(local_config);
                     }
                 }
@@ -1755,14 +1774,14 @@ impl Config {
             #[cfg(all(feature = "trust-dns", feature = "dns-over-https"))]
             "quad9_https" => DnsConfig::TrustDns(ResolverConfig::quad9_https()),
 
-            nameservers => Config::parse_dns_nameservers(nameservers)?,
+            nameservers => self.parse_dns_nameservers(nameservers)?,
         };
 
         Ok(())
     }
 
     #[cfg(any(feature = "trust-dns", feature = "local-dns"))]
-    fn parse_dns_nameservers(nameservers: &str) -> Result<DnsConfig, Error> {
+    fn parse_dns_nameservers(&mut self, nameservers: &str) -> Result<DnsConfig, Error> {
         #[cfg(all(unix, feature = "local-dns"))]
         if let Some(nameservers) = nameservers.strip_prefix("unix://") {
             // A special DNS server only for shadowsocks-android
@@ -1834,6 +1853,7 @@ impl Config {
                     trust_nx_responses: false,
                     #[cfg(any(feature = "dns-over-tls", feature = "dns-over-https"))]
                     tls_config: None,
+                    bind_addr: None,
                 });
             }
             if protocol.enable_tcp() {
@@ -1844,6 +1864,7 @@ impl Config {
                     trust_nx_responses: false,
                     #[cfg(any(feature = "dns-over-tls", feature = "dns-over-https"))]
                     tls_config: None,
+                    bind_addr: None,
                 });
             }
         }
@@ -1856,7 +1877,7 @@ impl Config {
     }
 
     #[cfg(not(any(feature = "trust-dns", feature = "local-dns")))]
-    fn parse_dns_nameservers(_nameservers: &str) -> Result<DnsConfig, Error> {
+    fn parse_dns_nameservers(&mut self, _nameservers: &str) -> Result<DnsConfig, Error> {
         Ok(DnsConfig::System)
     }
 
@@ -2116,6 +2137,9 @@ impl fmt::Display for Config {
                         tun_interface_name: local.tun_interface_name.clone(),
                         #[cfg(feature = "local-tun")]
                         tun_interface_address: local.tun_interface_address.as_ref().map(ToString::to_string),
+
+                        #[cfg(feature = "local")]
+                        socks5_auth_config_path: None,
                     };
                     jlocals.push(jlocal);
                 }

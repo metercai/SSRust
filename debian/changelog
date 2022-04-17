@@ -1,3 +1,35 @@
+shadowsocks-rust (1.14.3) unstable; urgency=medium
+
+  ## Features
+
+  - Automatically bump `RLIMIT_NOFILE` on Unix (except Android)
+    - https://github.com/golang/go/issues/46279
+    - http://0pointer.net/blog/file-descriptor-limits.html
+
+shadowsocks-rust (1.14.2) unstable; urgency=medium
+
+  ## Features
+
+  - #788 `sslocal` SOCKS5 protocol supports RFC1929 Username/Password Authentication
+    - SECURITY: This is insecured because (a) shadowsocks' SOCKS5 UDP Association doesn't require a dynamic port for each authorized clients (b) Username and passwords are sent in plain text.
+  - RustCrypto/ring-compat#79 HKDF-SHA1 uses [ring](https://crates.io/crates/ring)'s assembly implementation
+
+shadowsocks-rust (1.14.1) unstable; urgency=medium
+
+  ## Miscellaneous
+
+  - `shadowsocks`, `shadowsocks-service` crates upgraded to Rust Edition 2021.
+
+shadowsocks-rust (1.14.0) unstable; urgency=medium
+
+  ## Features
+
+  - Optimization: UDP associations managment removes unnecessary locks
+
+  ## Breaking Changes
+
+  - `shadowsocks_service::local::net::udp::UdpAssociationManager::new` returns clean-up interval and keep-alive receiver. It is not recommended to use this directly in your Project, because the API may change occationally.
+
 shadowsocks-rust (1.13.5) unstable; urgency=medium
 
   ## Features
