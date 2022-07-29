@@ -65,8 +65,17 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "local-tunnel", feature = "local-dns"))]
 use shadowsocks::relay::socks5::Address;
 use shadowsocks::{
-    config::{ManagerAddr, Mode, ReplayAttackPolicy, ServerAddr, ServerConfig, ServerWeight},
-    crypto::v1::CipherKind,
+    config::{
+        ManagerAddr,
+        Mode,
+        ReplayAttackPolicy,
+        ServerAddr,
+        ServerConfig,
+        ServerUser,
+        ServerUserManager,
+        ServerWeight,
+    },
+    crypto::CipherKind,
     plugin::PluginConfig,
 };
 #[cfg(feature = "trust-dns")]
@@ -178,10 +187,17 @@ struct SSConfig {
     fast_open: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    outbound_fwmark: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     security: Option<SSSecurityConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     balancer: Option<SSBalancerConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acl: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -248,11 +264,20 @@ struct SSLocalExtConfig {
     #[cfg(feature = "local-tun")]
     #[serde(skip_serializing_if = "Option::is_none")]
     tun_interface_address: Option<String>,
+    #[cfg(all(feature = "local-tun", unix))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tun_device_fd_from_path: Option<String>,
 
     /// SOCKS5
     #[cfg(feature = "local")]
     #[serde(skip_serializing_if = "Option::is_none")]
     socks5_auth_config_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SSServerUserConfig {
+    name: String,
+    password: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -265,8 +290,12 @@ struct SSServerExtConfig {
     #[serde(alias = "port")]
     server_port: u16,
 
-    password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
     method: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    users: Option<Vec<SSServerUserConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     disabled: Option<bool>,
@@ -992,6 +1021,17 @@ pub struct BalancerConfig {
     pub check_best_interval: Option<Duration>,
 }
 
+/// Address for local to report flow statistic data
+#[cfg(feature = "local-flow-stat")]
+#[derive(Debug, Clone)]
+pub enum LocalFlowStatAddress {
+    /// UNIX Domain Socket address
+    #[cfg(unix)]
+    UnixStreamPath(PathBuf),
+    /// TCP Stream Address
+    TcpStreamAddr(SocketAddr),
+}
+
 /// Configuration
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -1071,7 +1111,7 @@ pub struct Config {
 
     /// Flow statistic report Unix socket path (only for Android)
     #[cfg(feature = "local-flow-stat")]
-    pub stat_path: Option<PathBuf>,
+    pub local_stat_addr: Option<LocalFlowStatAddress>,
 
     /// Replay attack policy
     pub security: SecurityConfig,
@@ -1082,6 +1122,11 @@ pub struct Config {
     /// Configuration file path, the actual path of the configuration.
     /// This is normally for auto-reloading if implementation supports.
     pub config_path: Option<PathBuf>,
+
+    #[doc(hidden)]
+    /// Workers in runtime
+    /// It should be replaced with metrics APIs: https://github.com/tokio-rs/tokio/issues/4073
+    pub worker_count: usize,
 }
 
 /// Configuration parsing error kind
@@ -1185,13 +1230,15 @@ impl Config {
             acl: None,
 
             #[cfg(feature = "local-flow-stat")]
-            stat_path: None,
+            local_stat_addr: None,
 
             security: SecurityConfig::default(),
 
             balancer: BalancerConfig::default(),
 
             config_path: None,
+
+            worker_count: 1,
         }
     }
 
@@ -1434,6 +1481,11 @@ impl Config {
                             local_config.tun_interface_name = Some(tun_interface_name);
                         }
 
+                        #[cfg(all(feature = "local-tun", unix))]
+                        if let Some(tun_device_fd_from_path) = local.tun_device_fd_from_path {
+                            local_config.tun_device_fd_from_path = Some(From::from(tun_device_fd_from_path));
+                        }
+
                         #[cfg(feature = "local")]
                         if let Some(socks5_auth_config_path) = local.socks5_auth_config_path {
                             local_config.socks5_auth = Socks5AuthConfig::load_from_file(&socks5_auth_config_path)?;
@@ -1454,7 +1506,7 @@ impl Config {
         // Standard config
         // Server
         match (config.server, config.server_port, config.password, &config.method) {
-            (Some(address), Some(port), Some(pwd), Some(m)) => {
+            (Some(address), Some(port), pwd_opt, Some(m)) => {
                 let addr = match address.parse::<Ipv4Addr>() {
                     Ok(v4) => ServerAddr::SocketAddr(SocketAddr::V4(SocketAddrV4::new(v4, port))),
                     Err(..) => match address.parse::<Ipv6Addr>() {
@@ -1476,7 +1528,21 @@ impl Config {
                 };
 
                 // Only "password" support getting from environment variable.
-                let password = read_variable_field_value(&pwd);
+                let password = match pwd_opt {
+                    Some(ref pwd) => read_variable_field_value(pwd),
+                    None => {
+                        if method.is_none() {
+                            String::new().into()
+                        } else {
+                            let err = Error::new(
+                                ErrorKind::MissingField,
+                                "`password` is required",
+                                Some(format!("`password` is required for method {}", method)),
+                            );
+                            return Err(err);
+                        }
+                    }
+                };
 
                 let mut nsvr = ServerConfig::new(addr, password, method);
                 nsvr.set_mode(global_mode);
@@ -1546,9 +1612,46 @@ impl Config {
                 };
 
                 // Only "password" support getting from environment variable.
-                let password = read_variable_field_value(&svr.password);
+                let password = match svr.password {
+                    Some(ref pwd) => read_variable_field_value(pwd),
+                    None => {
+                        if method.is_none() {
+                            String::new().into()
+                        } else {
+                            let err = Error::new(
+                                ErrorKind::MissingField,
+                                "`password` is required",
+                                Some(format!("`password` is required for method {}", method)),
+                            );
+                            return Err(err);
+                        }
+                    }
+                };
 
                 let mut nsvr = ServerConfig::new(addr, password, method);
+
+                // Extensible Identity Header, Users
+                if let Some(users) = svr.users {
+                    let mut user_manager = ServerUserManager::new();
+
+                    for user in users {
+                        let key = match base64::decode_config(&user.password, base64::STANDARD) {
+                            Ok(k) => k,
+                            Err(..) => {
+                                let err = Error::new(
+                                    ErrorKind::Malformed,
+                                    "`users[].password` should be base64 encoded",
+                                    None,
+                                );
+                                return Err(err);
+                            }
+                        };
+
+                        user_manager.add_user(ServerUser::new(user.name, key));
+                    }
+
+                    nsvr.set_user_manager(user_manager);
+                }
 
                 match svr.mode {
                     Some(mode) => match mode.parse::<Mode>() {
@@ -1723,6 +1826,12 @@ impl Config {
             nconfig.ipv6_only = o;
         }
 
+        // SO_MARK
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(fwmark) = config.outbound_fwmark {
+            nconfig.outbound_fwmark = Some(fwmark);
+        }
+
         // Security
         if let Some(sec) = config.security {
             if let Some(replay_attack) = sec.replay_attack {
@@ -1744,6 +1853,21 @@ impl Config {
                 check_interval: balancer.check_interval.map(Duration::from_secs),
                 check_best_interval: balancer.check_best_interval.map(Duration::from_secs),
             };
+        }
+
+        if let Some(acl_path) = config.acl {
+            let acl = match AccessControl::load_from_file(&acl_path) {
+                Ok(acl) => acl,
+                Err(err) => {
+                    let err = Error::new(
+                        ErrorKind::Invalid,
+                        "acl loading failed",
+                        Some(format!("file {}, error: {}", acl_path, err)),
+                    );
+                    return Err(err);
+                }
+            };
+            nconfig.acl = Some(acl);
         }
 
         Ok(nconfig)
@@ -1929,15 +2053,6 @@ impl Config {
                 local_config.check_integrity()?;
             }
 
-            if self.server.is_empty() {
-                let err = Error::new(
-                    ErrorKind::MissingField,
-                    "missing `servers` for client configuration",
-                    None,
-                );
-                return Err(err);
-            }
-
             // Balancer related checks
             if let Some(rtt) = self.balancer.max_server_rtt {
                 if rtt.as_secs() == 0 {
@@ -2007,6 +2122,21 @@ impl Config {
                         let err = Error::new(
                             ErrorKind::Malformed,
                             "`server` shouldn't be an empty string, `server_port` shouldn't be 0",
+                            None,
+                        );
+                        return Err(err);
+                    }
+                }
+            }
+
+            // Users' key must match key length
+            if let Some(user_manager) = server.user_manager() {
+                let key_len = server.method().key_len();
+                for user in user_manager.users_iter() {
+                    if user.key().len() != key_len {
+                        let err = Error::new(
+                            ErrorKind::Malformed,
+                            "`users[].password` length must be exactly the same as method's key length",
                             None,
                         );
                         return Err(err);
@@ -2137,6 +2267,11 @@ impl fmt::Display for Config {
                         tun_interface_name: local.tun_interface_name.clone(),
                         #[cfg(feature = "local-tun")]
                         tun_interface_address: local.tun_interface_address.as_ref().map(ToString::to_string),
+                        #[cfg(all(feature = "local-tun", unix))]
+                        tun_device_fd_from_path: local
+                            .tun_device_fd_from_path
+                            .as_ref()
+                            .map(|p| p.to_str().expect("tun_device_fd_from_path is not utf-8").to_owned()),
 
                         #[cfg(feature = "local")]
                         socks5_auth_config_path: None,
@@ -2163,7 +2298,11 @@ impl fmt::Display for Config {
                     ServerAddr::DomainName(.., port) => port,
                 });
                 jconf.method = Some(svr.method().to_string());
-                jconf.password = Some(svr.password().to_string());
+                jconf.password = if svr.method().is_none() {
+                    None
+                } else {
+                    Some(svr.password().to_string())
+                };
                 jconf.plugin = svr.plugin().map(|p| p.plugin.to_string());
                 jconf.plugin_opts = svr.plugin().and_then(|p| p.plugin_opts.clone());
                 jconf.plugin_args = svr.plugin().and_then(|p| {
@@ -2190,8 +2329,22 @@ impl fmt::Display for Config {
                             ServerAddr::SocketAddr(ref sa) => sa.port(),
                             ServerAddr::DomainName(.., port) => port,
                         },
-                        password: svr.password().to_string(),
+                        password: if svr.method().is_none() {
+                            None
+                        } else {
+                            Some(svr.password().to_string())
+                        },
                         method: svr.method().to_string(),
+                        users: svr.user_manager().map(|m| {
+                            let mut vu = Vec::new();
+                            for u in m.users_iter() {
+                                vu.push(SSServerUserConfig {
+                                    name: u.name().to_owned(),
+                                    password: base64::encode(u.key()),
+                                });
+                            }
+                            vu
+                        }),
                         disabled: None,
                         plugin: svr.plugin().map(|p| p.plugin.to_string()),
                         plugin_opts: svr.plugin().and_then(|p| p.plugin_opts.clone()),
@@ -2302,6 +2455,11 @@ impl fmt::Display for Config {
             jconf.ipv6_only = Some(self.ipv6_only);
         }
 
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            jconf.outbound_fwmark = self.outbound_fwmark;
+        }
+
         // Security
         if self.security.replay_attack.policy != ReplayAttackPolicy::default() {
             jconf.security = Some(SSSecurityConfig {
@@ -2318,6 +2476,11 @@ impl fmt::Display for Config {
                 check_interval: self.balancer.check_interval.as_ref().map(Duration::as_secs),
                 check_best_interval: self.balancer.check_best_interval.as_ref().map(Duration::as_secs),
             });
+        }
+
+        // ACL
+        if let Some(ref acl) = self.acl {
+            jconf.acl = Some(acl.file_path().to_str().unwrap().to_owned());
         }
 
         write!(f, "{}", json5::to_string(&jconf).unwrap())

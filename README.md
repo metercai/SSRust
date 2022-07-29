@@ -7,9 +7,10 @@
 
 [![crates.io](https://img.shields.io/crates/v/shadowsocks-rust.svg)](https://crates.io/crates/shadowsocks-rust)
 [![Release](https://img.shields.io/github/release/shadowsocks/shadowsocks-rust.svg)](https://github.com/shadowsocks/shadowsocks-rust/releases)
-[![archlinuxcn shadowsocks-rust-git](https://img.shields.io/badge/dynamic/json?label=archlinuxcn-git&query=%24.latest.pkgver&url=https%3A%2F%2Fbuild.archlinuxcn.org%2Fapi%2Fpackages%2Fshadowsocks-rust-git)](https://build.archlinuxcn.org/)
-[![archlinuxcn shadowsocks-rust-opt-git](https://img.shields.io/badge/dynamic/json?label=archlinuxcn-opt-git&query=%24.latest.pkgver&url=https%3A%2F%2Fbuild.archlinuxcn.org%2Fapi%2Fpackages%2Fshadowsocks-rust-git)](https://build.archlinuxcn.org/)
+[![archlinuxcn shadowsocks-rust-git](https://img.shields.io/badge/dynamic/json?label=archlinuxcn-git&query=%24.version&url=https%3A%2F%2Fbuild.archlinuxcn.org%2Fapi%2Fv2%2Fpackages%2Fshadowsocks-rust-git)](https://build.archlinuxcn.org/)
+[![archlinuxcn shadowsocks-rust-opt-git](https://img.shields.io/badge/dynamic/json?label=archlinuxcn-opt-git&query=%24.version&url=https%3A%2F%2Fbuild.archlinuxcn.org%2Fapi%2Fv2%2Fpackages%2Fshadowsocks-rust-opt-git)](https://build.archlinuxcn.org/)
 [![aur shadowsocks-rust](https://img.shields.io/aur/version/shadowsocks-rust)](https://aur.archlinux.org/packages/shadowsocks-rust)
+[![NixOS](https://img.shields.io/badge/NixOS-shadowsocks--rust-blue?logo=nixos)](https://github.com/NixOS/nixpkgs/tree/master/pkgs/tools/networking/shadowsocks-rust)
 
 [![Get it from the Snap Store](https://snapcraft.io/static/images/badges/en/snap-store-black.svg)](https://snapcraft.io/shadowsocks-rust)
 
@@ -55,6 +56,10 @@ Related Projects:
 
 - `aead-cipher-extra` - Enable non-standard AEAD ciphers
 
+- `aead-cipher-2022` - Enable AEAD-2022 ciphers ([SIP022](https://github.com/shadowsocks/shadowsocks-org/issues/196))
+
+- `aead-cipher-2022-extra` - Enable AEAD-2022 extra ciphers (non-standard ciphers)
+
 #### Memory Allocators
 
 This project uses system (libc) memory allocator (Rust's default). But it also allows you to use other famous allocators by features:
@@ -75,6 +80,14 @@ cargo install shadowsocks-rust
 ```
 
 then you can find `sslocal` and `ssserver` in `$CARGO_HOME/bin`.
+
+### **Install using Homebrew**
+
+For macOS and Linux, you can install it using [Homebrew](https://brew.sh/):
+
+```bash
+brew install shadowsocks-rust
+```
 
 ### **Download release**
 
@@ -532,7 +545,7 @@ Example configuration:
     ],
 
     // Server configuration
-    // listen on [::] for dual stack support
+    // listen on :: for dual stack support, no need add [] around.
     "server": "::",
     // Change to use your custom port number
     "server_port": 8388,
@@ -576,6 +589,29 @@ Example configuration:
             "method": "chacha20-ietf-poly1305",
             // Read the actual password from environment variable PASSWORD_FROM_ENV
             "password": "${PASSWORD_FROM_ENV}"
+        },
+        {
+            // AEAD-2022
+            "server": "::",
+            "server_port": 8390,
+            "method": "2022-blake3-aes-256-gcm",
+            "password": "3SYJ/f8nmVuzKvKglykRQDSgg10e/ADilkdRWrrY9HU=",
+            // For Server (OPTIONAL)
+            // Support multiple users with Extensible Identity Header
+            // https://github.com/Shadowsocks-NET/shadowsocks-specs/blob/main/2022-2-shadowsocks-2022-extensible-identity-headers.md
+            "users": [
+                {
+                    "name": "username",
+                    // User's password must have the same length as server's password
+                    "password": "4w0GKJ9U3Ox7CIXGU4A3LDQAqP6qrp/tUi/ilpOR9p4="
+                }
+            ],
+            // For Client (OPTIONAL)
+            // If EIH enabled, then "password" should have the following format: iPSK:iPSK:iPSK:uPSK
+            // - iPSK is one of the middle relay servers' PSK, for the last `ssserver`, it must be server's PSK ("password")
+            // - uPSK is the user's PSK ("password")
+            // Example:
+            // "password": "3SYJ/f8nmVuzKvKglykRQDSgg10e/ADilkdRWrrY9HU=:4w0GKJ9U3Ox7CIXGU4A3LDQAqP6qrp/tUi/ilpOR9p4="
         }
     ],
 
@@ -687,6 +723,11 @@ The configuration file is set by `socks5_auth_config_path` in `locals`.
 
 ## Supported Ciphers
 
+### AEAD 2022 Ciphers
+
+- `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`
+- `2022-blake3-chacha20-poly1305`, `2022-blake3-chacha8-poly1305`
+
 ### AEAD Ciphers
 
 - `chacha20-ietf-poly1305`
@@ -795,6 +836,7 @@ It supports the following features:
 - [x] [SIP004](https://github.com/shadowsocks/shadowsocks-org/issues/30) AEAD ciphers
 - [x] [SIP003](https://github.com/shadowsocks/shadowsocks-org/issues/28) Plugins
 - [x] [SIP002](https://github.com/shadowsocks/shadowsocks-org/issues/27) Extension ss URLs
+- [x] [SIP022](https://github.com/shadowsocks/shadowsocks-org/issues/196) AEAD 2022 ciphers
 - [x] HTTP Proxy Supports ([RFC 7230](http://tools.ietf.org/html/rfc7230) and [CONNECT](https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01))
 - [x] Defend against replay attacks, [shadowsocks/shadowsocks-org#44](https://github.com/shadowsocks/shadowsocks-org/issues/44)
 - [x] Manager APIs, supporting [Manage Multiple Users](https://github.com/shadowsocks/shadowsocks/wiki/Manage-Multiple-Users)
@@ -836,3 +878,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/shadowsocks/shadowsocks-rust.svg)](https://starchart.cc/shadowsocks/shadowsocks-rust)

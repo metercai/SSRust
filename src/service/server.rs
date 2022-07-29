@@ -1,6 +1,6 @@
 //! Server launchers
 
-use std::{net::IpAddr, path::PathBuf, process, time::Duration};
+use std::{net::IpAddr, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Arg, ArgGroup, ArgMatches, Command, ErrorKind as ClapErrorKind};
 use futures::future::{self, Either};
@@ -13,7 +13,7 @@ use shadowsocks_service::{
     run_server,
     shadowsocks::{
         config::{ManagerAddr, Mode, ServerAddr, ServerConfig},
-        crypto::v1::{available_ciphers, CipherKind},
+        crypto::{available_ciphers, CipherKind},
         plugin::PluginConfig,
     },
 };
@@ -34,7 +34,7 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
                 .short('c')
                 .long("config")
                 .takes_value(true)
-                .help("Shadowsocks configuration file (https://shadowsocks.org/en/config/quick-guide.html)"),
+                .help("Shadowsocks configuration file (https://shadowsocks.org/guide/configs.html)"),
         )
         .arg(
             Arg::new("OUTBOUND_BIND_ADDR")
@@ -106,7 +106,7 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
                 .long("plugin")
                 .takes_value(true)
                 .requires("SERVER_ADDR")
-                .help("SIP003 (https://shadowsocks.org/en/wiki/Plugin.html) plugin"),
+                .help("SIP003 (https://shadowsocks.org/guide/sip003.html) plugin"),
         )
         .arg(
             Arg::new("PLUGIN_OPT")
@@ -217,11 +217,22 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
             );
     }
 
+    #[cfg(unix)]
+    {
+        app = app.arg(
+            Arg::new("USER")
+                .long("user")
+                .short('a')
+                .takes_value(true)
+                .help("Run as another user"),
+        );
+    }
+
     app
 }
 
 /// Program entrance `main`
-pub fn main(matches: &ArgMatches) {
+pub fn main(matches: &ArgMatches) -> ExitCode {
     let (config, runtime) = {
         let config_path_opt = matches.value_of("CONFIG").map(PathBuf::from).or_else(|| {
             if !matches.is_present("SERVER_CONFIG") {
@@ -242,7 +253,7 @@ pub fn main(matches: &ArgMatches) {
                 Ok(c) => c,
                 Err(err) => {
                     eprintln!("loading config {:?}, {}", config_path, err);
-                    process::exit(crate::EXIT_CODE_LOAD_CONFIG_FAILURE);
+                    return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
                 }
             },
             None => ServiceConfig::default(),
@@ -266,25 +277,31 @@ pub fn main(matches: &ArgMatches) {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     eprintln!("loading config {:?}, {}", cpath, err);
-                    process::exit(crate::EXIT_CODE_LOAD_CONFIG_FAILURE);
+                    return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
                 }
             },
             None => Config::new(ConfigType::Server),
         };
 
         if let Some(svr_addr) = matches.value_of("SERVER_ADDR") {
+            let method = matches.value_of_t_or_exit::<CipherKind>("ENCRYPT_METHOD");
+
             let password = match matches.value_of_t::<String>("PASSWORD") {
                 Ok(pwd) => read_variable_field_value(&pwd).into(),
                 Err(err) => {
                     // NOTE: svr_addr should have been checked by crate::validator
-                    match crate::password::read_server_password(svr_addr) {
-                        Ok(pwd) => pwd,
-                        Err(..) => err.exit(),
+                    if method.is_none() {
+                        // If method doesn't need a key (none, plain), then we can leave it empty
+                        String::new()
+                    } else {
+                        match crate::password::read_server_password(svr_addr) {
+                            Ok(pwd) => pwd,
+                            Err(..) => err.exit(),
+                        }
                     }
                 }
             };
 
-            let method = matches.value_of_t_or_exit::<CipherKind>("ENCRYPT_METHOD");
             let svr_addr = svr_addr.parse::<ServerAddr>().expect("server-addr");
             let timeout = match matches.value_of_t::<u64>("TIMEOUT") {
                 Ok(t) => Some(Duration::from_secs(t)),
@@ -381,7 +398,7 @@ pub fn main(matches: &ArgMatches) {
                 Ok(acl) => acl,
                 Err(err) => {
                     eprintln!("loading ACL \"{}\", {}", acl_file, err);
-                    process::exit(crate::EXIT_CODE_LOAD_ACL_FAILURE);
+                    return crate::EXIT_CODE_LOAD_ACL_FAILURE.into();
                 }
             };
             config.acl = Some(acl);
@@ -440,14 +457,14 @@ pub fn main(matches: &ArgMatches) {
             eprintln!(
                 "missing proxy servers, consider specifying it by \
                     --server-addr, --encrypt-method, --password command line option, \
-                        or configuration file, check more details in https://shadowsocks.org/en/config/quick-guide.html"
+                        or configuration file, check more details in https://shadowsocks.org/guide/configs.html"
             );
-            return;
+            return crate::EXIT_CODE_INSUFFICIENT_PARAMS.into();
         }
 
         if let Err(err) = config.check_integrity() {
             eprintln!("config integrity check failed, {}", err);
-            return;
+            return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
         }
 
         #[cfg(unix)]
@@ -456,20 +473,30 @@ pub fn main(matches: &ArgMatches) {
             daemonize::daemonize(matches.value_of("DAEMONIZE_PID_PATH"));
         }
 
+        #[cfg(unix)]
+        if let Some(uname) = matches.value_of("USER") {
+            crate::sys::run_as_user(uname);
+        }
+
         info!("shadowsocks server {} build {}", crate::VERSION, crate::BUILD_TIME);
 
+        let mut worker_count = 1;
         let mut builder = match service_config.runtime.mode {
             RuntimeMode::SingleThread => Builder::new_current_thread(),
             #[cfg(feature = "multi-threaded")]
             RuntimeMode::MultiThread => {
                 let mut builder = Builder::new_multi_thread();
                 if let Some(worker_threads) = service_config.runtime.worker_count {
+                    worker_count = worker_threads;
                     builder.worker_threads(worker_threads);
+                } else {
+                    worker_count = num_cpus::get();
                 }
 
                 builder
             }
         };
+        config.worker_count = worker_count;
 
         let runtime = builder.enable_all().build().expect("create tokio Runtime");
 
@@ -487,15 +514,15 @@ pub fn main(matches: &ArgMatches) {
             // Server future resolved without an error. This should never happen.
             Either::Left((Ok(..), ..)) => {
                 eprintln!("server exited unexpectedly");
-                process::exit(crate::EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY);
+                crate::EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY.into()
             }
             // Server future resolved with error, which are listener errors in most cases
             Either::Left((Err(err), ..)) => {
                 eprintln!("server aborted with {}", err);
-                process::exit(crate::EXIT_CODE_SERVER_ABORTED);
+                crate::EXIT_CODE_SERVER_ABORTED.into()
             }
             // The abort signal future resolved. Means we should just exit.
-            Either::Right(_) => (),
+            Either::Right(_) => ExitCode::SUCCESS,
         }
-    });
+    })
 }

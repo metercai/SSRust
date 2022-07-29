@@ -8,15 +8,17 @@ use std::{
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
 use etherparse::PacketBuilder;
-use log::trace;
+use log::{debug, trace};
 use shadowsocks::relay::socks5::Address;
 use tokio::sync::mpsc;
 
-use crate::local::{
-    context::ServiceContext,
-    loadbalancing::PingBalancer,
-    net::{UdpAssociationManager, UdpInboundWrite},
-    utils::to_ipv4_mapped,
+use crate::{
+    local::{
+        context::ServiceContext,
+        loadbalancing::PingBalancer,
+        net::{UdpAssociationManager, UdpInboundWrite},
+    },
+    net::utils::to_ipv4_mapped,
 };
 
 pub struct UdpTun {
@@ -50,7 +52,16 @@ impl UdpTun {
         payload: &[u8],
     ) -> io::Result<()> {
         trace!("UDP {} -> {} payload.size: {} bytes", src_addr, dst_addr, payload.len());
-        self.manager.send_to(src_addr, dst_addr.into(), payload).await
+        if let Err(err) = self.manager.send_to(src_addr, dst_addr.into(), payload).await {
+            debug!(
+                "UDP {} -> {} payload.size: {} bytes failed, error: {}",
+                src_addr,
+                dst_addr,
+                payload.len(),
+                err,
+            );
+        }
+        Ok(())
     }
 
     pub async fn recv_packet(&mut self) -> BytesMut {
@@ -88,12 +99,24 @@ impl UdpInboundWrite for UdpTunInboundWriter {
         let addr = match *remote_addr {
             Address::SocketAddress(sa) => {
                 // Try to convert IPv4 mapped IPv6 address if server is running on dual-stack mode
-                match sa {
-                    SocketAddr::V4(..) => sa,
-                    SocketAddr::V6(ref v6) => match to_ipv4_mapped(v6.ip()) {
-                        Some(v4) => SocketAddr::new(IpAddr::from(v4), v6.port()),
-                        None => sa,
-                    },
+                match (peer_addr, sa) {
+                    (SocketAddr::V4(..), SocketAddr::V4(..)) | (SocketAddr::V6(..), SocketAddr::V6(..)) => sa,
+                    (SocketAddr::V4(..), SocketAddr::V6(v6)) => {
+                        // If peer is IPv4, then remote_addr can only be IPv4-mapped-IPv6
+                        match to_ipv4_mapped(v6.ip()) {
+                            Some(v4) => SocketAddr::new(IpAddr::from(v4), v6.port()),
+                            None => {
+                                return Err(io::Error::new(
+                                    ErrorKind::InvalidData,
+                                    "source and destination type unmatch",
+                                ));
+                            }
+                        }
+                    }
+                    (SocketAddr::V6(..), SocketAddr::V4(v4)) => {
+                        // Convert remote_addr to IPv4-mapped-IPv6
+                        SocketAddr::new(IpAddr::from(v4.ip().to_ipv6_mapped()), v4.port())
+                    }
                 }
             }
             Address::DomainNameAddress(..) => {

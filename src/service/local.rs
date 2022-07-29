@@ -1,6 +1,6 @@
 //! Local server launchers
 
-use std::{net::IpAddr, path::PathBuf, process, time::Duration};
+use std::{net::IpAddr, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Arg, ArgGroup, ArgMatches, Command, ErrorKind as ClapErrorKind};
 use futures::future::{self, Either};
@@ -18,7 +18,7 @@ use shadowsocks_service::{
     local::loadbalancing::PingBalancer,
     shadowsocks::{
         config::{Mode, ServerAddr, ServerConfig},
-        crypto::v1::{available_ciphers, CipherKind},
+        crypto::{available_ciphers, CipherKind},
         plugin::PluginConfig,
     },
 };
@@ -38,7 +38,7 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
             .short('c')
             .long("config")
             .takes_value(true)
-            .help("Shadowsocks configuration file (https://shadowsocks.org/en/config/quick-guide.html)"),
+            .help("Shadowsocks configuration file (https://shadowsocks.org/guide/configs.html)"),
     )
     .arg(
         Arg::new("LOCAL_ADDR")
@@ -113,7 +113,7 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
             .long("plugin")
             .takes_value(true)
             .requires("SERVER_ADDR")
-            .help("SIP003 (https://shadowsocks.org/en/wiki/Plugin.html) plugin"),
+            .help("SIP003 (https://shadowsocks.org/guide/sip003.html) plugin"),
     )
     .arg(
         Arg::new("PLUGIN_OPT")
@@ -127,7 +127,7 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
             .long("server-url")
             .takes_value(true)
             .validator(validator::validate_server_url)
-            .help("Server address in SIP002 (https://shadowsocks.org/en/wiki/SIP002-URI-Scheme.html) URL"),
+            .help("Server address in SIP002 (https://shadowsocks.org/guide/sip002.html) URL"),
     )
     .group(ArgGroup::new("SERVER_CONFIG")
         .arg("SERVER_ADDR").arg("URL").multiple(true))
@@ -260,11 +260,23 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
 
     #[cfg(feature = "local-flow-stat")]
     {
+        #[cfg(unix)]
+        {
+            app = app.arg(
+                Arg::new("STAT_PATH")
+                    .long("stat-path")
+                    .takes_value(true)
+                    .conflicts_with("STAT_ADDR")
+                    .help("Specify socket path (unix domain socket) for sending traffic statistic"),
+            );
+        }
+
         app = app.arg(
-            Arg::new("STAT_PATH")
-                .long("stat-path")
+            Arg::new("STAT_ADDR")
+                .long("stat-addr")
                 .takes_value(true)
-                .help("Specify socket path (unix domain socket) for sending traffic statistic"),
+                .validator(validator::validate_socket_addr)
+                .help("Specify socket address IP:PORT (TCP) for sending traffic statistic"),
         );
     }
 
@@ -360,11 +372,22 @@ pub fn define_command_line_options(mut app: Command<'_>) -> Command<'_> {
             );
     }
 
+    #[cfg(unix)]
+    {
+        app = app.arg(
+            Arg::new("USER")
+                .long("user")
+                .short('a')
+                .takes_value(true)
+                .help("Run as another user"),
+        );
+    }
+
     app
 }
 
 /// Program entrance `main`
-pub fn main(matches: &ArgMatches) {
+pub fn main(matches: &ArgMatches) -> ExitCode {
     let (config, runtime) = {
         let config_path_opt = matches.value_of("CONFIG").map(PathBuf::from).or_else(|| {
             if !matches.is_present("SERVER_CONFIG") {
@@ -385,7 +408,7 @@ pub fn main(matches: &ArgMatches) {
                 Ok(c) => c,
                 Err(err) => {
                     eprintln!("loading config {:?}, {}", config_path, err);
-                    process::exit(crate::EXIT_CODE_LOAD_CONFIG_FAILURE);
+                    return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
                 }
             },
             None => ServiceConfig::default(),
@@ -409,25 +432,31 @@ pub fn main(matches: &ArgMatches) {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     eprintln!("loading config {:?}, {}", cpath, err);
-                    process::exit(crate::EXIT_CODE_LOAD_CONFIG_FAILURE);
+                    return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
                 }
             },
             None => Config::new(ConfigType::Local),
         };
 
         if let Some(svr_addr) = matches.value_of("SERVER_ADDR") {
+            let method = matches.value_of_t_or_exit::<CipherKind>("ENCRYPT_METHOD");
+
             let password = match matches.value_of_t::<String>("PASSWORD") {
                 Ok(pwd) => read_variable_field_value(&pwd).into(),
                 Err(err) => {
                     // NOTE: svr_addr should have been checked by crate::validator
-                    match crate::password::read_server_password(svr_addr) {
-                        Ok(pwd) => pwd,
-                        Err(..) => err.exit(),
+                    if method.is_none() {
+                        // If method doesn't need a key (none, plain), then we can leave it empty
+                        String::new()
+                    } else {
+                        match crate::password::read_server_password(svr_addr) {
+                            Ok(pwd) => pwd,
+                            Err(..) => err.exit(),
+                        }
                     }
                 }
             };
 
-            let method = matches.value_of_t_or_exit::<CipherKind>("ENCRYPT_METHOD");
             let svr_addr = svr_addr.parse::<ServerAddr>().expect("server-addr");
 
             let timeout = match matches.value_of_t::<u64>("TIMEOUT") {
@@ -462,8 +491,18 @@ pub fn main(matches: &ArgMatches) {
 
         #[cfg(feature = "local-flow-stat")]
         {
+            use shadowsocks_service::config::LocalFlowStatAddress;
+            use std::net::SocketAddr;
+
+            #[cfg(unix)]
             if let Some(stat_path) = matches.value_of("STAT_PATH") {
-                config.stat_path = Some(From::from(stat_path));
+                config.local_stat_addr = Some(LocalFlowStatAddress::UnixStreamPath(From::from(stat_path)));
+            }
+
+            match matches.value_of_t::<SocketAddr>("STAT_ADDR") {
+                Ok(stat_addr) => config.local_stat_addr = Some(LocalFlowStatAddress::TcpStreamAddr(stat_addr)),
+                Err(ref err) if err.kind() == ClapErrorKind::ArgumentNotFound => {}
+                Err(err) => err.exit(),
             }
         }
 
@@ -520,16 +559,20 @@ pub fn main(matches: &ArgMatches) {
 
             #[cfg(feature = "local-redir")]
             {
-                match matches.value_of_t::<RedirType>("TCP_REDIR") {
-                    Ok(tcp_redir) => local_config.tcp_redir = tcp_redir,
-                    Err(ref err) if err.kind() == ClapErrorKind::ArgumentNotFound => {}
-                    Err(err) => err.exit(),
+                if RedirType::tcp_default() != RedirType::NotSupported {
+                    match matches.value_of_t::<RedirType>("TCP_REDIR") {
+                        Ok(tcp_redir) => local_config.tcp_redir = tcp_redir,
+                        Err(ref err) if err.kind() == ClapErrorKind::ArgumentNotFound => {}
+                        Err(err) => err.exit(),
+                    }
                 }
 
-                match matches.value_of_t::<RedirType>("UDP_REDIR") {
-                    Ok(udp_redir) => local_config.udp_redir = udp_redir,
-                    Err(ref err) if err.kind() == ClapErrorKind::ArgumentNotFound => {}
-                    Err(err) => err.exit(),
+                if RedirType::udp_default() != RedirType::NotSupported {
+                    match matches.value_of_t::<RedirType>("UDP_REDIR") {
+                        Ok(udp_redir) => local_config.udp_redir = udp_redir,
+                        Err(ref err) if err.kind() == ClapErrorKind::ArgumentNotFound => {}
+                        Err(err) => err.exit(),
+                    }
                 }
             }
 
@@ -675,7 +718,7 @@ pub fn main(matches: &ArgMatches) {
                 Ok(acl) => acl,
                 Err(err) => {
                     eprintln!("loading ACL \"{}\", {}", acl_file, err);
-                    process::exit(crate::EXIT_CODE_LOAD_ACL_FAILURE);
+                    return crate::EXIT_CODE_LOAD_ACL_FAILURE.into();
                 }
             };
             config.acl = Some(acl);
@@ -735,28 +778,23 @@ pub fn main(matches: &ArgMatches) {
                 "missing `local_address`, consider specifying it by --local-addr command line option, \
                     or \"local_address\" and \"local_port\" in configuration file"
             );
-            return;
-        }
-
-        if config.server.is_empty() {
-            eprintln!(
-                "missing proxy servers, consider specifying it by \
-                    --server-addr, --encrypt-method, --password command line option, \
-                        or --server-url command line option, \
-                        or configuration file, check more details in https://shadowsocks.org/en/config/quick-guide.html"
-            );
-            return;
+            return crate::EXIT_CODE_INSUFFICIENT_PARAMS.into();
         }
 
         if let Err(err) = config.check_integrity() {
             eprintln!("config integrity check failed, {}", err);
-            return;
+            return crate::EXIT_CODE_LOAD_CONFIG_FAILURE.into();
         }
 
         #[cfg(unix)]
         if matches.is_present("DAEMONIZE") || matches.is_present("DAEMONIZE_PID_PATH") {
             use crate::daemonize;
             daemonize::daemonize(matches.value_of("DAEMONIZE_PID_PATH"));
+        }
+
+        #[cfg(unix)]
+        if let Some(uname) = matches.value_of("USER") {
+            crate::sys::run_as_user(uname);
         }
 
         info!("shadowsocks local {} build {}", crate::VERSION, crate::BUILD_TIME);
@@ -798,17 +836,17 @@ pub fn main(matches: &ArgMatches) {
             // Server future resolved without an error. This should never happen.
             Either::Left((Ok(..), ..)) => {
                 eprintln!("server exited unexpectedly");
-                process::exit(crate::EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY);
+                crate::EXIT_CODE_SERVER_EXIT_UNEXPECTEDLY.into()
             }
             // Server future resolved with error, which are listener errors in most cases
             Either::Left((Err(err), ..)) => {
                 eprintln!("server aborted with {}", err);
-                process::exit(crate::EXIT_CODE_SERVER_ABORTED);
+                crate::EXIT_CODE_SERVER_ABORTED.into()
             }
             // The abort signal future resolved. Means we should just exit.
-            Either::Right(_) => (),
+            Either::Right(_) => ExitCode::SUCCESS,
         }
-    });
+    })
 }
 
 #[cfg(unix)]
