@@ -7,12 +7,12 @@
 //! *It should be notice that the extended configuration file is not suitable for the server
 //! side.*
 
-use std::{env, path::Path};
+use std::{env, path::Path, process::ExitCode};
 
 use clap::Command;
-use shadowsocks_rust::service::{local, manager, server};
+use shadowsocks_rust::service::{genkey, local, manager, server};
 
-fn main() {
+fn main() -> ExitCode {
     let app = Command::new("shadowsocks")
         .version(shadowsocks_rust::VERSION)
         .about("A fast tunnel proxy that helps you bypass firewalls. (https://shadowsocks.org)");
@@ -36,12 +36,17 @@ fn main() {
         .subcommand(
             manager::define_command_line_options(Command::new("manager")).about("Shadowsocks Server Manager service"),
         )
+        .subcommand(
+            genkey::define_command_line_options(Command::new("genkey"))
+                .about("Generate shadowsocks encryption key for method"),
+        )
         .get_matches();
 
     match matches.subcommand() {
         Some(("local", matches)) => local::main(matches),
         Some(("server", matches)) => server::main(matches),
         Some(("manager", matches)) => manager::main(matches),
+        Some(("genkey", matches)) => genkey::main(matches),
         _ => unreachable!("expecting a subcommand"),
     }
 }

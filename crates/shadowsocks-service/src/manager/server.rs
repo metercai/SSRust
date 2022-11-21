@@ -6,9 +6,9 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use log::{error, info, trace};
 use shadowsocks::{
-    config::{Mode, ServerConfig, ServerType},
+    config::{Mode, ServerConfig, ServerType, ServerUser, ServerUserManager},
     context::{Context, SharedContext},
-    crypto::v1::CipherKind,
+    crypto::CipherKind,
     dns_resolver::DnsResolver,
     manager::protocol::{
         self,
@@ -20,6 +20,7 @@ use shadowsocks::{
         PingResponse,
         RemoveRequest,
         RemoveResponse,
+        ServerUserConfig,
         StatRequest,
     },
     net::{AcceptOpts, ConnectOpts},
@@ -82,6 +83,7 @@ pub struct Manager {
     acl: Option<Arc<AccessControl>>,
     ipv6_first: bool,
     security: SecurityConfig,
+    worker_count: usize,
 }
 
 impl Manager {
@@ -103,6 +105,7 @@ impl Manager {
             acl: None,
             ipv6_first: false,
             security: SecurityConfig::default(),
+            worker_count: 1,
         }
     }
 
@@ -150,6 +153,14 @@ impl Manager {
     /// Set security config
     pub fn set_security_config(&mut self, security: SecurityConfig) {
         self.security = security;
+    }
+
+    /// Set runtime worker count
+    ///
+    /// Should be replaced with tokio's metric API when it is stablized.
+    /// https://github.com/tokio-rs/tokio/issues/4073
+    pub fn set_worker_count(&mut self, worker_count: usize) {
+        self.worker_count = worker_count;
     }
 
     /// Start serving
@@ -234,6 +245,8 @@ impl Manager {
         }
 
         server.set_security_config(&self.security);
+
+        server.set_worker_count(self.worker_count);
 
         let server_port = server.config().addr().port();
 
@@ -366,16 +379,21 @@ impl Manager {
         let manager_addr = self.svr_cfg.addr.to_string();
 
         // Start server process
-        let child_result = Command::new(&self.svr_cfg.server_program)
+        let mut child_command = Command::new(&self.svr_cfg.server_program);
+        child_command
             .arg("-c")
             .arg(&config_file_path)
             .arg("--daemonize")
             .arg("--daemonize-pid")
             .arg(&pid_path)
             .arg("--manager-addr")
-            .arg(&manager_addr)
-            .kill_on_drop(false)
-            .spawn();
+            .arg(&manager_addr);
+
+        if let Some(ref acl) = self.acl {
+            child_command.arg("--acl").arg(acl.file_path().to_str().expect("acl"));
+        }
+
+        let child_result = child_command.kill_on_drop(false).spawn();
 
         if let Err(err) = child_result {
             error!(
@@ -442,6 +460,31 @@ impl Manager {
 
         svr_cfg.set_mode(mode.unwrap_or(self.svr_cfg.mode));
 
+        if let Some(ref users) = req.users {
+            let mut user_manager = ServerUserManager::new();
+
+            for user in users.iter() {
+                let key = match base64::decode_config(&user.password, base64::STANDARD) {
+                    Ok(key) => key,
+                    Err(..) => {
+                        error!(
+                            "users[].password must be encoded with base64, but found: {}",
+                            user.password
+                        );
+
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "users[].password must be encoded with base64",
+                        ));
+                    }
+                };
+
+                user_manager.add_user(ServerUser::new(&user.name, key));
+            }
+
+            svr_cfg.set_user_manager(user_manager);
+        }
+
         self.add_server(svr_cfg).await;
 
         Ok(AddResponse("ok".to_owned()))
@@ -467,6 +510,20 @@ impl Manager {
         for (_, server) in instances.iter() {
             let svr_cfg = &server.svr_cfg;
 
+            let mut users = None;
+            if let Some(user_manager) = server.svr_cfg.user_manager() {
+                let mut vu = Vec::with_capacity(user_manager.user_count());
+
+                for user in user_manager.users_iter() {
+                    vu.push(ServerUserConfig {
+                        name: user.name().to_owned(),
+                        password: base64::encode(user.key()),
+                    });
+                }
+
+                users = Some(vu);
+            }
+
             let sc = protocol::ServerConfig {
                 server_port: svr_cfg.addr().port(),
                 password: svr_cfg.password().to_owned(),
@@ -475,6 +532,7 @@ impl Manager {
                 plugin: None,
                 plugin_opts: None,
                 mode: None,
+                users,
             };
             servers.push(sc);
         }

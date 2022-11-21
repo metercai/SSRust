@@ -7,7 +7,7 @@ use log::warn;
 
 use crate::{
     config::{ReplayAttackPolicy, ServerType},
-    crypto::v1::random_iv_or_salt,
+    crypto::{v1::random_iv_or_salt, CipherKind},
     dns_resolver::DnsResolver,
     security::replay::ReplayProtector,
 };
@@ -35,7 +35,7 @@ impl Context {
     pub fn new(config_type: ServerType) -> Context {
         Context {
             replay_protector: ReplayProtector::new(config_type),
-            replay_policy: ReplayAttackPolicy::Ignore,
+            replay_policy: ReplayAttackPolicy::Default,
             dns_resolver: Arc::new(DnsResolver::system_resolver()),
             ipv6_first: false,
         }
@@ -50,15 +50,15 @@ impl Context {
     ///
     /// If not, set into the current bloom filter
     #[inline(always)]
-    fn check_nonce_and_set(&self, nonce: &[u8]) -> bool {
+    fn check_nonce_and_set(&self, method: CipherKind, nonce: &[u8]) -> bool {
         match self.replay_policy {
             ReplayAttackPolicy::Ignore => false,
-            _ => self.replay_protector.check_nonce_and_set(nonce),
+            _ => self.replay_protector.check_nonce_and_set(method, nonce),
         }
     }
 
     /// Generate nonce (IV or SALT)
-    pub fn generate_nonce(&self, nonce: &mut [u8], unique: bool) {
+    pub fn generate_nonce(&self, method: CipherKind, nonce: &mut [u8], unique: bool) {
         if nonce.is_empty() {
             return;
         }
@@ -66,27 +66,8 @@ impl Context {
         loop {
             random_iv_or_salt(nonce);
 
-            // SECURITY: First 6 bytes of payload should be printable characters
-            // Observation shows that prepending 6 bytes of printable characters to random payload will exempt it from blocking.
-            // by 2022-01-13 gfw.report et al.
-            #[cfg(feature = "security-iv-printable-prefix")]
-            {
-                const SECURITY_PRINTABLE_PREFIX_LEN: usize = 6;
-                if nonce.len() >= SECURITY_PRINTABLE_PREFIX_LEN {
-                    use rand::Rng;
-
-                    // Printable characters follows definition of isprint in C/C++
-                    static ASCII_PRINTABLE_CHARS: &[u8] = br##"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~ "##;
-
-                    let mut rng = rand::thread_rng();
-                    for b in nonce.iter_mut().take(SECURITY_PRINTABLE_PREFIX_LEN) {
-                        *b = ASCII_PRINTABLE_CHARS[rng.gen_range::<usize, _>(0..ASCII_PRINTABLE_CHARS.len())];
-                    }
-                }
-            }
-
             // Salt already exists, generate a new one.
-            if unique && self.check_nonce_and_set(nonce) {
+            if unique && self.check_nonce_and_set(method, nonce) {
                 continue;
             }
 
@@ -95,21 +76,30 @@ impl Context {
     }
 
     /// Check nonce replay
-    pub fn check_nonce_replay(&self, nonce: &[u8]) -> io::Result<()> {
+    pub fn check_nonce_replay(&self, method: CipherKind, nonce: &[u8]) -> io::Result<()> {
         if nonce.is_empty() {
             return Ok(());
         }
 
-        match self.replay_policy {
-            ReplayAttackPolicy::Ignore => Ok(()),
+        #[allow(unused_mut)]
+        let mut replay_policy = self.replay_policy;
+
+        #[cfg(feature = "aead-cipher-2022")]
+        if method.is_aead_2022() {
+            // AEAD-2022 can't be ignored.
+            replay_policy = ReplayAttackPolicy::Reject;
+        }
+
+        match replay_policy {
+            ReplayAttackPolicy::Default | ReplayAttackPolicy::Ignore => Ok(()),
             ReplayAttackPolicy::Detect => {
-                if self.replay_protector.check_nonce_and_set(nonce) {
+                if self.replay_protector.check_nonce_and_set(method, nonce) {
                     warn!("detected repeated nonce (iv/salt) {:?}", ByteStr::new(nonce));
                 }
                 Ok(())
             }
             ReplayAttackPolicy::Reject => {
-                if self.replay_protector.check_nonce_and_set(nonce) {
+                if self.replay_protector.check_nonce_and_set(method, nonce) {
                     let err = io::Error::new(io::ErrorKind::Other, "detected repeated nonce (iv/salt)");
                     Err(err)
                 } else {
@@ -150,5 +140,10 @@ impl Context {
     /// Set policy against replay attack
     pub fn set_replay_attack_policy(&mut self, replay_policy: ReplayAttackPolicy) {
         self.replay_policy = replay_policy;
+    }
+
+    /// Get policy against replay attach
+    pub fn replay_attack_policy(&self) -> ReplayAttackPolicy {
+        self.replay_policy
     }
 }

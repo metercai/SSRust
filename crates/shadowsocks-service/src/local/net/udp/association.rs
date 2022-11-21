@@ -1,9 +1,10 @@
 //! UDP Association Managing
 
 use std::{
+    cell::RefCell,
     io::{self, ErrorKind},
     marker::PhantomData,
-    net::SocketAddr,
+    net::{SocketAddr, SocketAddrV6},
     sync::Arc,
     time::Duration,
 };
@@ -13,20 +14,26 @@ use bytes::Bytes;
 use futures::future;
 use log::{debug, error, trace, warn};
 use lru_time_cache::LruCache;
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 
 use shadowsocks::{
     lookup_then,
-    net::UdpSocket as ShadowUdpSocket,
+    net::{AddrFamily, UdpSocket as ShadowUdpSocket},
     relay::{
-        udprelay::{ProxySocket, MAXIMUM_UDP_PAYLOAD_SIZE},
+        udprelay::{options::UdpSocketControlData, ProxySocket, MAXIMUM_UDP_PAYLOAD_SIZE},
         Address,
     },
 };
 
 use crate::{
     local::{context::ServiceContext, loadbalancing::PingBalancer},
-    net::{MonProxySocket, UDP_ASSOCIATION_KEEP_ALIVE_CHANNEL_SIZE, UDP_ASSOCIATION_SEND_CHANNEL_SIZE},
+    net::{
+        packet_window::PacketWindowFilter,
+        MonProxySocket,
+        UDP_ASSOCIATION_KEEP_ALIVE_CHANNEL_SIZE,
+        UDP_ASSOCIATION_SEND_CHANNEL_SIZE,
+    },
 };
 
 /// Writer for sending packets back to client
@@ -51,6 +58,7 @@ where
     assoc_map: AssociationMap<W>,
     keepalive_tx: mpsc::Sender<SocketAddr>,
     balancer: PingBalancer,
+    server_session_expire_duration: Duration,
 }
 
 impl<W> UdpAssociationManager<W>
@@ -82,6 +90,7 @@ where
                 assoc_map,
                 keepalive_tx,
                 balancer,
+                server_session_expire_duration: time_to_live,
             },
             time_to_live,
             keepalive_rx,
@@ -102,6 +111,7 @@ where
             self.keepalive_tx.clone(),
             self.balancer.clone(),
             self.respond_writer.clone(),
+            self.server_session_expire_duration,
         );
 
         debug!("created udp association for {}", peer_addr);
@@ -151,9 +161,16 @@ where
         keepalive_tx: mpsc::Sender<SocketAddr>,
         balancer: PingBalancer,
         respond_writer: W,
+        server_session_expire_duration: Duration,
     ) -> UdpAssociation<W> {
-        let (assoc_handle, sender) =
-            UdpAssociationContext::create(context, peer_addr, keepalive_tx, balancer, respond_writer);
+        let (assoc_handle, sender) = UdpAssociationContext::create(
+            context,
+            peer_addr,
+            keepalive_tx,
+            balancer,
+            respond_writer,
+            server_session_expire_duration,
+        );
         UdpAssociation {
             assoc_handle,
             sender,
@@ -170,6 +187,24 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+struct ServerContext {
+    packet_window_filter: PacketWindowFilter,
+}
+
+#[derive(Clone)]
+struct ServerSessionContext {
+    server_session_map: LruCache<u64, ServerContext>,
+}
+
+impl ServerSessionContext {
+    fn new(session_expire_duration: Duration) -> ServerSessionContext {
+        ServerSessionContext {
+            server_session_map: LruCache::with_expiry_duration(session_expire_duration),
+        }
+    }
+}
+
 struct UdpAssociationContext<W>
 where
     W: UdpInboundWrite + Send + Sync + Unpin + 'static,
@@ -183,6 +218,10 @@ where
     keepalive_flag: bool,
     balancer: PingBalancer,
     respond_writer: W,
+    client_session_id: u64,
+    client_packet_id: u64,
+    server_session: Option<ServerSessionContext>,
+    server_session_expire_duration: Duration,
 }
 
 impl<W> Drop for UdpAssociationContext<W>
@@ -192,6 +231,15 @@ where
     fn drop(&mut self) {
         debug!("udp association for {} is closed", self.peer_addr);
     }
+}
+
+thread_local! {
+    static CLIENT_SESSION_RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_entropy());
+}
+
+#[inline]
+fn generate_client_session_id() -> u64 {
+    CLIENT_SESSION_RNG.with(|rng| rng.borrow_mut().gen())
 }
 
 impl<W> UdpAssociationContext<W>
@@ -204,6 +252,7 @@ where
         keepalive_tx: mpsc::Sender<SocketAddr>,
         balancer: PingBalancer,
         respond_writer: W,
+        server_session_expire_duration: Duration,
     ) -> (JoinHandle<()>, mpsc::Sender<(Address, Bytes)>) {
         // Pending packets UDP_ASSOCIATION_SEND_CHANNEL_SIZE for each association should be good enough for a server.
         // If there are plenty of packets stuck in the channel, dropping excessive packets is a good way to protect the server from
@@ -220,6 +269,12 @@ where
             keepalive_flag: false,
             balancer,
             respond_writer,
+            // client_session_id must be random generated,
+            // server use this ID to identify every independent clients.
+            client_session_id: generate_client_session_id(),
+            client_packet_id: 0,
+            server_session: None,
+            server_session_expire_duration,
         };
         let handle = tokio::spawn(async move { assoc.dispatch_packet(receiver).await });
 
@@ -246,7 +301,7 @@ where
                     self.dispatch_received_packet(&target_addr, &data).await;
                 }
 
-                received_opt = receive_from_bypassed_opt(&self.bypassed_ipv4_socket, &mut bypassed_ipv4_buffer) => {
+                received_opt = receive_from_bypassed_opt(&self.bypassed_ipv4_socket, &mut bypassed_ipv4_buffer), if self.bypassed_ipv4_socket.is_some() => {
                     let (n, addr) = match received_opt {
                         Ok(r) => r,
                         Err(err) => {
@@ -261,7 +316,7 @@ where
                     self.send_received_respond_packet(&addr, &bypassed_ipv4_buffer[..n], true).await;
                 }
 
-                received_opt = receive_from_bypassed_opt(&self.bypassed_ipv6_socket, &mut bypassed_ipv6_buffer) => {
+                received_opt = receive_from_bypassed_opt(&self.bypassed_ipv6_socket, &mut bypassed_ipv6_buffer), if self.bypassed_ipv6_socket.is_some() => {
                     let (n, addr) = match received_opt {
                         Ok(r) => r,
                         Err(err) => {
@@ -276,8 +331,8 @@ where
                     self.send_received_respond_packet(&addr, &bypassed_ipv6_buffer[..n], true).await;
                 }
 
-                received_opt = receive_from_proxied_opt(&self.proxied_socket, &mut proxied_buffer) => {
-                    let (n, addr) = match received_opt {
+                received_opt = receive_from_proxied_opt(&self.proxied_socket, &mut proxied_buffer), if self.proxied_socket.is_some() => {
+                    let (n, addr, control_opt) = match received_opt {
                         Ok(r) => r,
                         Err(err) => {
                             error!("udp relay {} <- ... (proxied) failed, error: {}", self.peer_addr, err);
@@ -286,6 +341,35 @@ where
                             continue;
                         }
                     };
+
+                    if let Some(control) = control_opt {
+                        // Check if Packet ID is in the window
+
+                        let session = self.server_session.get_or_insert_with(|| {
+                            ServerSessionContext::new(self.server_session_expire_duration)
+                        });
+
+                        let packet_id = control.packet_id;
+                        let session_context = session
+                            .server_session_map
+                            .entry(control.server_session_id)
+                            .or_insert_with(|| {
+                                trace!(
+                                    "udp server with session {} for {} created",
+                                    control.client_session_id,
+                                    self.peer_addr,
+                                );
+
+                                ServerContext {
+                                    packet_window_filter: PacketWindowFilter::new()
+                                }
+                            });
+
+                        if !session_context.packet_window_filter.validate_packet_id(packet_id, u64::MAX) {
+                            error!("udp {} packet_id {} out of window", self.peer_addr, packet_id);
+                            continue;
+                        }
+                    }
 
                     self.send_received_respond_packet(&addr, &proxied_buffer[..n], false).await;
                 }
@@ -322,14 +406,14 @@ where
         async fn receive_from_proxied_opt(
             socket: &Option<MonProxySocket>,
             buf: &mut Vec<u8>,
-        ) -> io::Result<(usize, Address)> {
+        ) -> io::Result<(usize, Address, Option<UdpSocketControlData>)> {
             match *socket {
                 None => future::pending().await,
                 Some(ref s) => {
                     if buf.is_empty() {
                         buf.resize(MAXIMUM_UDP_PAYLOAD_SIZE, 0);
                     }
-                    s.recv(buf).await
+                    s.recv_with_ctrl(buf).await
                 }
             }
         }
@@ -337,7 +421,7 @@ where
 
     async fn dispatch_received_packet(&mut self, target_addr: &Address, data: &[u8]) {
         // Check if target should be bypassed. If so, send packets directly.
-        let bypassed = self.context.check_target_bypassed(target_addr).await;
+        let bypassed = self.balancer.is_empty() || self.context.check_target_bypassed(target_addr).await;
 
         trace!(
             "udp relay {} -> {} ({}) with {} bytes",
@@ -382,25 +466,59 @@ where
         }
     }
 
-    async fn send_received_bypassed_packet(&mut self, target_addr: SocketAddr, data: &[u8]) -> io::Result<()> {
-        let socket = match target_addr {
-            SocketAddr::V4(..) => match self.bypassed_ipv4_socket {
+    async fn send_received_bypassed_packet(&mut self, mut target_addr: SocketAddr, data: &[u8]) -> io::Result<()> {
+        const UDP_SOCKET_SUPPORT_DUAL_STACK: bool = cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos",
+            target_os = "freebsd",
+            // target_os = "dragonfly",
+            // target_os = "netbsd",
+            target_os = "windows",
+        ));
+
+        let socket = if UDP_SOCKET_SUPPORT_DUAL_STACK {
+            match self.bypassed_ipv6_socket {
                 Some(ref mut socket) => socket,
                 None => {
                     let socket =
-                        ShadowUdpSocket::connect_any_with_opts(&target_addr, self.context.connect_opts_ref()).await?;
-                    self.bypassed_ipv4_socket.insert(socket)
-                }
-            },
-            SocketAddr::V6(..) => match self.bypassed_ipv6_socket {
-                Some(ref mut socket) => socket,
-                None => {
-                    let socket =
-                        ShadowUdpSocket::connect_any_with_opts(&target_addr, self.context.connect_opts_ref()).await?;
+                        ShadowUdpSocket::connect_any_with_opts(AddrFamily::Ipv6, self.context.connect_opts_ref())
+                            .await?;
                     self.bypassed_ipv6_socket.insert(socket)
                 }
-            },
+            }
+        } else {
+            match target_addr {
+                SocketAddr::V4(..) => match self.bypassed_ipv4_socket {
+                    Some(ref mut socket) => socket,
+                    None => {
+                        let socket =
+                            ShadowUdpSocket::connect_any_with_opts(&target_addr, self.context.connect_opts_ref())
+                                .await?;
+                        self.bypassed_ipv4_socket.insert(socket)
+                    }
+                },
+                SocketAddr::V6(..) => match self.bypassed_ipv6_socket {
+                    Some(ref mut socket) => socket,
+                    None => {
+                        let socket =
+                            ShadowUdpSocket::connect_any_with_opts(&target_addr, self.context.connect_opts_ref())
+                                .await?;
+                        self.bypassed_ipv6_socket.insert(socket)
+                    }
+                },
+            }
         };
+
+        if UDP_SOCKET_SUPPORT_DUAL_STACK {
+            if let SocketAddr::V4(saddr) = target_addr {
+                let mapped_ip = saddr.ip().to_ipv6_mapped();
+                target_addr = SocketAddr::V6(SocketAddrV6::new(mapped_ip, saddr.port(), 0, 0));
+            }
+        }
 
         let n = socket.send_to(data, target_addr).await?;
         if n != data.len() {
@@ -417,6 +535,32 @@ where
     }
 
     async fn dispatch_received_proxied_packet(&mut self, target_addr: &Address, data: &[u8]) -> io::Result<()> {
+        // Increase Packet ID before send
+        self.client_packet_id = match self.client_packet_id.checked_add(1) {
+            Some(i) => i,
+            None => {
+                // FIXME: client_packet_id overflowed. What's the proper way to handle this?
+                //
+                // Reopen a new session is not perfect, because the remote target will receive packets from a different address.
+                // For most application protocol, like QUIC, it is fine to change client address.
+                //
+                // But it will happen only when a client continously send 18446744073709551616 packets without renewing the socket.
+
+                let new_session_id = generate_client_session_id();
+
+                warn!(
+                    "{} -> {} (proxied) packet id overflowed. socket reset and session renewed ({} -> {})",
+                    self.peer_addr, target_addr, self.client_session_id, new_session_id
+                );
+
+                self.proxied_socket.take();
+                self.client_packet_id = 1;
+                self.client_session_id = new_session_id;
+
+                self.client_packet_id
+            }
+        };
+
         let socket = match self.proxied_socket {
             Some(ref mut socket) => socket,
             None => {
@@ -434,7 +578,11 @@ where
             }
         };
 
-        match socket.send(target_addr, data).await {
+        let mut control = UdpSocketControlData::default();
+        control.client_session_id = self.client_session_id;
+        control.packet_id = self.client_packet_id;
+
+        match socket.send_with_ctrl(target_addr, &control, data).await {
             Ok(..) => return Ok(()),
             Err(err) => {
                 debug!(
