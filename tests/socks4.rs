@@ -11,7 +11,7 @@ use tokio::{
 };
 
 use shadowsocks_service::{
-    config::{Config, ConfigType, LocalConfig, ProtocolType},
+    config::{Config, ConfigType, LocalConfig, LocalInstanceConfig, ProtocolType, ServerInstanceConfig},
     local::socks::client::Socks4TcpClient,
     run_local,
     run_server,
@@ -40,16 +40,24 @@ impl Socks4TestServer {
             local_addr,
             svr_config: {
                 let mut cfg = Config::new(ConfigType::Server);
-                cfg.server = vec![ServerConfig::new(svr_addr, pwd.to_owned(), method)];
+                cfg.server = vec![ServerInstanceConfig::with_server_config(ServerConfig::new(
+                    svr_addr,
+                    pwd.to_owned(),
+                    method,
+                ))];
                 cfg
             },
             cli_config: {
                 let mut cfg = Config::new(ConfigType::Local);
-                cfg.local = vec![LocalConfig::new_with_addr(
+                cfg.local = vec![LocalInstanceConfig::with_local_config(LocalConfig::new_with_addr(
                     ServerAddr::from(local_addr),
                     ProtocolType::Socks,
-                )];
-                cfg.server = vec![ServerConfig::new(svr_addr, pwd.to_owned(), method)];
+                ))];
+                cfg.server = vec![ServerInstanceConfig::with_server_config(ServerConfig::new(
+                    svr_addr,
+                    pwd.to_owned(),
+                    method,
+                ))];
                 cfg
             },
         }
@@ -83,9 +91,9 @@ async fn socks4_relay_connect() {
     let svr = Socks4TestServer::new(SERVER_ADDR, LOCAL_ADDR, PASSWORD, METHOD);
     svr.run().await;
 
-    static HTTP_REQUEST: &[u8] = b"GET / HTTP/1.0\r\nHost: www.example.com\r\nAccept: */*\r\n\r\n";
+    static HTTP_REQUEST: &[u8] = b"GET /success.txt HTTP/1.0\r\nHost: detectportal.firefox.com\r\nAccept: */*\r\n\r\n";
 
-    let mut c = Socks4TcpClient::connect(("www.example.com", 80), LOCAL_ADDR, Vec::new())
+    let mut c = Socks4TcpClient::connect(("detectportal.firefox.com", 80), LOCAL_ADDR, Vec::new())
         .await
         .unwrap();
 

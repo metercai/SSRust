@@ -272,6 +272,9 @@ struct SSLocalExtConfig {
     #[cfg(feature = "local")]
     #[serde(skip_serializing_if = "Option::is_none")]
     socks5_auth_config_path: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acl: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -322,6 +325,9 @@ struct SSServerExtConfig {
     tcp_weight: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     udp_weight: Option<f32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acl: Option<String>,
 }
 
 /// Server config type
@@ -1032,13 +1038,45 @@ pub enum LocalFlowStatAddress {
     TcpStreamAddr(SocketAddr),
 }
 
+/// Server instance config
+#[derive(Debug, Clone)]
+pub struct ServerInstanceConfig {
+    /// Server's config
+    pub config: ServerConfig,
+    /// Server's private ACL, set to `None` will use the global `AccessControl`
+    pub acl: Option<AccessControl>,
+}
+
+impl ServerInstanceConfig {
+    /// Create with `ServerConfig`
+    pub fn with_server_config(config: ServerConfig) -> ServerInstanceConfig {
+        ServerInstanceConfig { config, acl: None }
+    }
+}
+
+/// Local instance config
+#[derive(Debug, Clone)]
+pub struct LocalInstanceConfig {
+    /// Local server's config
+    pub config: LocalConfig,
+    /// Server's private ACL, set to `None` will use the global `AccessControl`
+    pub acl: Option<AccessControl>,
+}
+
+impl LocalInstanceConfig {
+    /// Create with `LocalConfig`
+    pub fn with_local_config(config: LocalConfig) -> LocalInstanceConfig {
+        LocalInstanceConfig { config, acl: None }
+    }
+}
+
 /// Configuration
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Remote ShadowSocks server configurations
-    pub server: Vec<ServerConfig>,
+    pub server: Vec<ServerInstanceConfig>,
     /// Local server configuration
-    pub local: Vec<LocalConfig>,
+    pub local: Vec<LocalInstanceConfig>,
 
     /// DNS configuration, uses system-wide DNS configuration by default
     ///
@@ -1106,7 +1144,9 @@ pub struct Config {
     /// Maximum number of UDP Associations, default is unconfigured
     pub udp_max_associations: Option<usize>,
 
-    /// ACL configuration
+    /// ACL configuration (Global)
+    ///
+    /// Could be overwritten by servers/locals' private `acl`
     pub acl: Option<AccessControl>,
 
     /// Flow statistic report Unix socket path (only for Android)
@@ -1319,13 +1359,19 @@ impl Config {
                                 let err = Error::new(
                                     ErrorKind::Malformed,
                                     "`protocol` invalid",
-                                    Some(format!("unrecognized protocol {}", p)),
+                                    Some(format!("unrecognized protocol {p}")),
                                 );
                                 return Err(err);
                             }
                         },
                     };
-                    nconfig.local.push(local_config);
+
+                    let local_instance = LocalInstanceConfig {
+                        config: local_config,
+                        acl: None,
+                    };
+
+                    nconfig.local.push(local_instance);
                 }
 
                 // Ext locals
@@ -1344,7 +1390,7 @@ impl Config {
                                     let err = Error::new(
                                         ErrorKind::Malformed,
                                         "`protocol` invalid",
-                                        Some(format!("unrecognized protocol {}", p)),
+                                        Some(format!("unrecognized protocol {p}")),
                                     );
                                     return Err(err);
                                 }
@@ -1491,7 +1537,27 @@ impl Config {
                             local_config.socks5_auth = Socks5AuthConfig::load_from_file(&socks5_auth_config_path)?;
                         }
 
-                        nconfig.local.push(local_config);
+                        let mut local_instance = LocalInstanceConfig {
+                            config: local_config,
+                            acl: None,
+                        };
+
+                        if let Some(acl_path) = local.acl {
+                            let acl = match AccessControl::load_from_file(&acl_path) {
+                                Ok(acl) => acl,
+                                Err(err) => {
+                                    let err = Error::new(
+                                        ErrorKind::Invalid,
+                                        "acl loading failed",
+                                        Some(format!("file {acl_path}, error: {err}")),
+                                    );
+                                    return Err(err);
+                                }
+                            };
+                            local_instance.acl = Some(acl);
+                        }
+
+                        nconfig.local.push(local_instance);
                     }
                 }
             }
@@ -1521,7 +1587,7 @@ impl Config {
                         let err = Error::new(
                             ErrorKind::Invalid,
                             "unsupported method",
-                            Some(format!("`{}` is not a supported method", m)),
+                            Some(format!("`{m}` is not a supported method")),
                         );
                         return Err(err);
                     }
@@ -1537,7 +1603,7 @@ impl Config {
                             let err = Error::new(
                                 ErrorKind::MissingField,
                                 "`password` is required",
-                                Some(format!("`password` is required for method {}", method)),
+                                Some(format!("`password` is required for method {method}")),
                             );
                             return Err(err);
                         }
@@ -1564,7 +1630,12 @@ impl Config {
                     nsvr.set_timeout(timeout);
                 }
 
-                nconfig.server.push(nsvr);
+                let server_instance = ServerInstanceConfig {
+                    config: nsvr,
+                    acl: None,
+                };
+
+                nconfig.server.push(server_instance);
             }
             (None, None, None, Some(_)) if config_type.is_manager() => {
                 // Set the default method for manager
@@ -1621,7 +1692,7 @@ impl Config {
                             let err = Error::new(
                                 ErrorKind::MissingField,
                                 "`password` is required",
-                                Some(format!("`password` is required for method {}", method)),
+                                Some(format!("`password` is required for method {method}")),
                             );
                             return Err(err);
                         }
@@ -1711,7 +1782,27 @@ impl Config {
                     nsvr.set_weight(weight);
                 }
 
-                nconfig.server.push(nsvr);
+                let mut server_instance = ServerInstanceConfig {
+                    config: nsvr,
+                    acl: None,
+                };
+
+                if let Some(acl_path) = svr.acl {
+                    let acl = match AccessControl::load_from_file(&acl_path) {
+                        Ok(acl) => acl,
+                        Err(err) => {
+                            let err = Error::new(
+                                ErrorKind::Invalid,
+                                "acl loading failed",
+                                Some(format!("file {acl_path}, error: {err}")),
+                            );
+                            return Err(err);
+                        }
+                    };
+                    server_instance.acl = Some(acl);
+                }
+
+                nconfig.server.push(server_instance);
             }
         }
 
@@ -1719,7 +1810,8 @@ impl Config {
         if let Some(timeout) = config.timeout {
             let timeout = Duration::from_secs(timeout);
             // Set as a default timeout
-            for svr in &mut nconfig.server {
+            for inst in &mut nconfig.server {
+                let svr = &mut inst.config;
                 if svr.timeout().is_none() {
                     svr.set_timeout(timeout);
                 }
@@ -1757,7 +1849,7 @@ impl Config {
                         let err = Error::new(
                             ErrorKind::Invalid,
                             "unsupported method",
-                            Some(format!("`{}` is not a supported method", m)),
+                            Some(format!("`{m}` is not a supported method")),
                         );
                         return Err(err);
                     }
@@ -1862,7 +1954,7 @@ impl Config {
                     let err = Error::new(
                         ErrorKind::Invalid,
                         "acl loading failed",
-                        Some(format!("file {}, error: {}", acl_path, err)),
+                        Some(format!("file {acl_path}, error: {err}")),
                     );
                     return Err(err);
                 }
@@ -2029,7 +2121,9 @@ impl Config {
 
     /// Check if there are any plugin are enabled with servers
     pub fn has_server_plugins(&self) -> bool {
-        for server in &self.server {
+        for inst in &self.server {
+            let server = &inst.config;
+
             if server.plugin().is_some() {
                 return true;
             }
@@ -2050,7 +2144,7 @@ impl Config {
             }
 
             for local_config in &self.local {
-                local_config.check_integrity()?;
+                local_config.config.check_integrity()?;
             }
 
             // Balancer related checks
@@ -2087,7 +2181,9 @@ impl Config {
             return Err(err);
         }
 
-        for server in &self.server {
+        for inst in &self.server {
+            let server = &inst.config;
+
             // Plugin shouldn't be an empty string
             if let Some(plugin) = server.plugin() {
                 if plugin.plugin.trim().is_empty() {
@@ -2157,8 +2253,9 @@ impl fmt::Display for Config {
 
         // Locals
         if !self.local.is_empty() {
-            if self.local.len() == 1 && self.local[0].is_basic() {
-                let local = &self.local[0];
+            if self.local.len() == 1 && self.local[0].config.is_basic() {
+                let local_instance = &self.local[0];
+                let local = &local_instance.config;
                 if let Some(ref a) = local.addr {
                     jconf.local_address = Some(match a {
                         ServerAddr::SocketAddr(ref sa) => sa.ip().to_string(),
@@ -2169,12 +2266,20 @@ impl fmt::Display for Config {
                         ServerAddr::DomainName(.., port) => *port,
                     });
                 }
+
                 if local.protocol != ProtocolType::Socks {
                     jconf.protocol = Some(local.protocol.as_str().to_owned());
                 }
+
+                // ACL
+                if let Some(ref acl) = local_instance.acl {
+                    jconf.acl = Some(acl.file_path().to_str().unwrap().to_owned());
+                }
             } else {
                 let mut jlocals = Vec::with_capacity(self.local.len());
-                for local in &self.local {
+                for local_instance in &self.local {
+                    let local = &local_instance.config;
+
                     let jlocal = SSLocalExtConfig {
                         local_address: local.addr.as_ref().map(|a| match a {
                             ServerAddr::SocketAddr(ref sa) => sa.ip().to_string(),
@@ -2275,6 +2380,11 @@ impl fmt::Display for Config {
 
                         #[cfg(feature = "local")]
                         socks5_auth_config_path: None,
+
+                        acl: local_instance
+                            .acl
+                            .as_ref()
+                            .and_then(|a| a.file_path().to_str().map(ToOwned::to_owned)),
                     };
                     jlocals.push(jlocal);
                 }
@@ -2286,8 +2396,9 @@ impl fmt::Display for Config {
         match self.server.len() {
             0 => {}
             // For 1 server, uses standard configure format
-            1 if self.server[0].is_basic() => {
-                let svr = &self.server[0];
+            1 if self.server[0].config.is_basic() => {
+                let inst = &self.server[0];
+                let svr = &inst.config;
 
                 jconf.server = Some(match *svr.addr() {
                     ServerAddr::SocketAddr(ref sa) => sa.ip().to_string(),
@@ -2314,12 +2425,18 @@ impl fmt::Display for Config {
                 });
                 jconf.timeout = svr.timeout().map(|t| t.as_secs());
                 jconf.mode = Some(svr.mode().to_string());
+
+                if let Some(ref acl) = inst.acl {
+                    jconf.acl = Some(acl.file_path().to_str().unwrap().to_owned());
+                }
             }
             // For >1 servers, uses extended multiple server format
             _ => {
                 let mut vsvr = Vec::new();
 
-                for svr in &self.server {
+                for inst in &self.server {
+                    let svr = &inst.config;
+
                     vsvr.push(SSServerExtConfig {
                         server: match *svr.addr() {
                             ServerAddr::SocketAddr(ref sa) => sa.ip().to_string(),
@@ -2369,6 +2486,10 @@ impl fmt::Display for Config {
                         } else {
                             None
                         },
+                        acl: inst
+                            .acl
+                            .as_ref()
+                            .and_then(|a| a.file_path().to_str().map(ToOwned::to_owned)),
                     });
                 }
 

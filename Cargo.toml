@@ -1,6 +1,6 @@
 [package]
 name = "shadowsocks-rust"
-version = "1.15.0-alpha.8"
+version = "1.15.2"
 authors = ["Shadowsocks Contributors"]
 description = "shadowsocks is a fast tunnel proxy that helps you bypass firewalls."
 repository = "https://github.com/shadowsocks/shadowsocks-rust"
@@ -9,7 +9,7 @@ documentation = "https://docs.rs/shadowsocks-rust"
 keywords = ["shadowsocks", "proxy", "socks", "socks5", "firewall"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.61"
+rust-version = "1.64"
 
 [badges]
 maintenance = { status = "passively-maintained" }
@@ -43,7 +43,6 @@ required-features = ["service"]
 members = [
     "crates/shadowsocks",
     "crates/shadowsocks-service",
-    "crates/shadowsocks-tools",
 ]
 
 [profile.release]
@@ -136,22 +135,16 @@ aead-cipher-2022-extra = ["shadowsocks-service/aead-cipher-2022-extra"]
 # Enable detection against replay attack (Stream / AEAD)
 security-replay-attack-detect = ["shadowsocks-service/security-replay-attack-detect"]
 replay-attack-detect = ["security-replay-attack-detect"] # Backward compatibility. DO NOT USE.
-# Enable IV printable prefix
-security-iv-printable-prefix = ["shadowsocks-service/security-iv-printable-prefix"]
-
-# Enable ARMv8 related optimizations
-armv8 = ["shadowsocks-service/armv8"]
-# Enable NEON releated optimizations
-neon = ["shadowsocks-service/neon"]
 
 [dependencies]
 log = "0.4"
-log4rs = { version = "1.0", optional = true }
+log4rs = { version = "1.2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 json5 = "0.4"
 thiserror = "1.0"
+base64 = "0.13"
 
-clap = { version = "3.2", features = ["wrap_help", "suggestions"] }
+clap = { version = "4.0", features = ["wrap_help", "suggestions"] }
 cfg-if = "1"
 qrcode = { version = "0.12", default-features = false, optional = true }
 sysexits = "0.3"
@@ -160,12 +153,13 @@ directories = "4.0"
 xdg = "2.4"
 rpassword = "7.0"
 libc = { version = "0.2", features = ["extra_traits"] }
+rand = "0.8"
 
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "signal"] }
 num_cpus = "1.13"
 
-ipnet = { version = "2.3", optional = true }
+ipnet = { version = "2.7", optional = true }
 
 mimalloc = { version = "0.1", default-features = false, optional = true }
 tcmalloc = { version = "0.3", optional = true }
@@ -180,6 +174,6 @@ daemonize = "0.4"
 
 [dev-dependencies]
 byteorder = "1.3"
-env_logger = "0.9"
+env_logger = "0.10"
 byte_string = "1.0"
 tokio = { version = "1", features = ["net", "time", "macros", "io-util"] }
