@@ -42,7 +42,7 @@ jobs:
         with:
           profile: minimal
           target: ${{ matrix.target }}
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
 
@@ -65,10 +65,6 @@ jobs:
             if [[ "$?" == "0" ]]; then
               compile_compress="-u"
             fi
-          fi
-
-          if [[ "$compile_target" == "aarch64-"* ]]; then
-            compile_features="$compile_features -f armv8 -f neon"
           fi
 
           cd build
@@ -109,15 +105,9 @@ jobs:
         with:
           profile: minimal
           target: ${{ matrix.target }}
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
-
-      # https://github.com/actions/virtual-environments/issues/2557#issuecomment-769611326
-      - if: ${{ matrix.target }} == 'aarch64-apple-darwin'
-        run: |
-          sudo xcode-select -s /Applications/Xcode_12.4.app &&
-          sudo rm -Rf /Library/Developer/CommandLineTools/SDKs/*
 
       - name: Build release
         shell: bash
@@ -145,7 +135,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
 

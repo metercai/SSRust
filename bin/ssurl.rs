@@ -7,7 +7,7 @@ use clap::{Arg, ArgAction, Command, ValueHint};
 use qrcode::{types::Color, QrCode};
 
 use shadowsocks_service::{
-    config::{Config, ConfigType},
+    config::{Config, ConfigType, ServerInstanceConfig},
     shadowsocks::config::ServerConfig,
 };
 
@@ -21,25 +21,25 @@ fn print_qrcode(encoded: &str) {
     let qrcode = QrCode::new(encoded.as_bytes()).unwrap();
 
     for _ in 0..qrcode.width() + 2 {
-        print!("{}", WHITE);
+        print!("{WHITE}");
     }
     println!();
 
     for y in 0..qrcode.width() {
-        print!("{}", WHITE);
+        print!("{WHITE}");
         for x in 0..qrcode.width() {
             let color = match qrcode[(x, y)] {
                 Color::Light => WHITE,
                 Color::Dark => BLACK,
             };
 
-            print!("{}", color);
+            print!("{color}");
         }
-        println!("{}", WHITE);
+        println!("{WHITE}");
     }
 
     for _ in 0..qrcode.width() + 2 {
-        print!("{}", WHITE);
+        print!("{WHITE}");
     }
     println!();
 }
@@ -48,12 +48,12 @@ fn encode(filename: &str, need_qrcode: bool) {
     let config = Config::load_from_file(filename, ConfigType::Server).unwrap();
 
     for svr in config.server {
-        let encoded = svr.to_url();
+        let encoded = svr.config.to_url();
 
-        println!("{}", encoded);
+        println!("{encoded}");
 
         if need_qrcode {
-            let encoded = svr.to_qrcode_url();
+            let encoded = svr.config.to_qrcode_url();
             print_qrcode(&encoded);
         }
     }
@@ -63,9 +63,9 @@ fn decode(encoded: &str, need_qrcode: bool) {
     let svrconfig = ServerConfig::from_url(encoded).unwrap();
 
     let mut config = Config::new(ConfigType::Server);
-    config.server.push(svrconfig);
+    config.server.push(ServerInstanceConfig::with_server_config(svrconfig));
 
-    println!("{}", config);
+    println!("{config}");
 
     if need_qrcode {
         print_qrcode(encoded);

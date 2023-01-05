@@ -117,8 +117,25 @@ impl Rules {
     /// Check if the specified address matches any rules
     fn check_ip_matched(&self, addr: &IpAddr) -> bool {
         match addr {
-            IpAddr::V4(v4) => self.ipv4.contains(v4),
-            IpAddr::V6(v6) => self.ipv6.contains(v6),
+            IpAddr::V4(v4) => {
+                if self.ipv4.contains(v4) {
+                    return true;
+                }
+
+                let mapped_ipv6 = v4.to_ipv6_mapped();
+                self.ipv6.contains(&mapped_ipv6)
+            }
+            IpAddr::V6(v6) => {
+                if self.ipv6.contains(v6) {
+                    return true;
+                }
+
+                if let Some(mapped_ipv4) = v6.to_ipv4_mapped() {
+                    return self.ipv4.contains(&mapped_ipv4);
+                }
+
+                false
+            }
         }
     }
 
@@ -252,7 +269,7 @@ impl ParsingRules {
             .size_limit(REGEX_SIZE_LIMIT)
             .unicode(false)
             .build()
-            .map_err(|err| Error::new(ErrorKind::Other, format!("{} regex error: {}", name, err)))
+            .map_err(|err| Error::new(ErrorKind::Other, format!("{name} regex error: {err}")))
     }
 
     fn into_rules(self) -> io::Result<Rules> {

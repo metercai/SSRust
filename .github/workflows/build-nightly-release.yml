@@ -28,12 +28,15 @@ jobs:
         with:
           profile: minimal
           target: ${{ matrix.target }}
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
 
-      - name: Install cross
-        run: cargo install cross
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
 
       - name: Build ${{ matrix.target }}
         timeout-minutes: 120
@@ -51,12 +54,8 @@ jobs:
             fi
           fi
 
-          if [[ "$compile_target" == "aarch64-"* ]]; then
-            compile_features="$compile_features -f armv8 -f neon"
-          fi
-
           cd build
-          ./build-release -t ${{ matrix.target }} $compile_features $compile_compress
+          ./build-release-zigbuild -t ${{ matrix.target }} $compile_features $compile_compress
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v2
@@ -67,7 +66,7 @@ jobs:
   build-unix:
     runs-on: ${{ matrix.os }}
     env:
-      BUILD_EXTRA_FEATURES: "local-redir local-tun armv8 neon"
+      BUILD_EXTRA_FEATURES: "local-redir local-tun"
       RUST_BACKTRACE: full
     strategy:
       matrix:
@@ -90,15 +89,9 @@ jobs:
         with:
           profile: minimal
           target: ${{ matrix.target }}
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
-
-      # https://github.com/actions/virtual-environments/issues/2557#issuecomment-769611326
-      - if: ${{ matrix.target }} == 'aarch64-apple-darwin'
-        run: |
-          sudo xcode-select -s /Applications/Xcode_12.4.app &&
-          sudo rm -Rf /Library/Developer/CommandLineTools/SDKs/*
 
       - name: Build release
         shell: bash
@@ -123,7 +116,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: stable
           default: true
           override: true
 

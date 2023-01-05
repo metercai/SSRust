@@ -1,6 +1,6 @@
 [package]
 name = "shadowsocks-service"
-version = "1.15.0"
+version = "1.15.2"
 authors = ["Shadowsocks Contributors"]
 description = "shadowsocks is a fast tunnel proxy that helps you bypass firewalls."
 repository = "https://github.com/shadowsocks/shadowsocks-rust"
@@ -76,19 +76,14 @@ aead-cipher-2022-extra = ["shadowsocks/aead-cipher-2022-extra"]
 # Enable detection against replay attack
 security-replay-attack-detect = ["shadowsocks/security-replay-attack-detect"]
 
-# Enable ARMv8 related optimizations
-armv8 = ["shadowsocks/armv8"]
-# Enable NEON releated optimizations
-neon = ["shadowsocks/neon"]
-
 [dependencies]
 log = "0.4"
 
 cfg-if = "1"
 pin-project = "1.0"
-once_cell = "1.15"
+once_cell = "1.17"
 thiserror = "1.0"
-arc-swap = "1.5"
+arc-swap = "1.6"
 
 spin = { version = "0.9" }
 lru_time_cache = "0.11"
@@ -115,12 +110,12 @@ tower = { version = "0.4", optional = true }
 trust-dns-resolver = { version = "0.22", optional = true, features = ["serde-config"] }
 
 idna = "0.3"
-ipnet = "2.3"
+ipnet = "2.7"
 iprange = "0.6"
 regex = "1.4"
 
 tun = { version = "0.5.3", optional = true, features = ["async"] }
-etherparse = { version = "0.12", optional = true }
+etherparse = { version = "0.13", optional = true }
 smoltcp = { version = "0.8", optional = true, default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-udp", "socket-tcp"] }
 
 serde = { version = "1.0", features = ["derive"] }
@@ -131,14 +126,14 @@ shadowsocks = { version = "1.15.0", path = "../shadowsocks", default-features = 
 
 # Just for the ioctl call macro
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-nix = "0.25"
+nix = "0.26"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.42", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 byteorder = "1.3"
-env_logger = "0.9"
+env_logger = "0.10"
 
 [package.metadata.docs.rs]
 features = ["full", "local-http-rustls", "local-dns", "dns-over-tls", "dns-over-https"]
