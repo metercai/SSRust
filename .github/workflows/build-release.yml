@@ -69,6 +69,7 @@ jobs:
 
           cd build
           ./build-release -t ${{ matrix.target }} $compile_features $compile_compress
+          cd release
           for var in shadowsocks-*; do mv "$var" "ssrust-${shadowsocks-var%}"; done
 
       - name: Upload Github Assets
