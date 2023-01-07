@@ -70,7 +70,7 @@ jobs:
           cd build
           ./build-release -t ${{ matrix.target }} $compile_features $compile_compress
           cd release
-          for var in `ls shadowsocks-*`; do mv -f "$var" `echo "$var" |sed 's/^shadowsocks/ssrust/'`; done
+          for var in `ls shadowsocks-*`; do mv -f "$var" `echo "$var" |sed 's/^shadowsocks/ssrust-dns/'`; done
 
       - name: Upload Github Assets
         uses: softprops/action-gh-release@v1
