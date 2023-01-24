@@ -46,7 +46,7 @@ libc = "0.2.94"
 bytes = "1.2"
 cfg-if = "1"
 byte_string = "1.0"
-base64 = "0.13"
+base64 = "0.21"
 url = "2.2"
 once_cell = "1.17"
 spin = { version = "0.9", features = ["std"] }
@@ -82,7 +82,7 @@ shadowsocks-crypto = { version = "0.5.1", features = ["ring"] }
 shadowsocks-crypto = { version = "0.5.1", features = [] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.42", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }
+windows-sys = { version = "0.45", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }
 
 [target.'cfg(unix)'.dependencies]
 sendfd = { version = "0.4", features = ["tokio"] }
