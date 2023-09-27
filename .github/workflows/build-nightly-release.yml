@@ -1,10 +1,8 @@
 name: Build Nightly Releases
 on:
   push:
-    tags:
-      - v*
-#      push:
-#    branches: [master]
+    branches: [master]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,28 +13,25 @@ jobs:
     env:
       RUST_BACKTRACE: full
     strategy:
+      fail-fast: false
       matrix:
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          target: ${{ matrix.target }}
-          toolchain: stable
-          default: true
-          override: true
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+          rustup override set stable
+          rustup target add --toolchain stable ${{ matrix.target }}
 
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild
+      - name: Install cross
+        run: cargo install cross
 
       - name: Build ${{ matrix.target }}
         timeout-minutes: 120
@@ -55,10 +50,10 @@ jobs:
           fi
 
           cd build
-          ./build-release-zigbuild -t ${{ matrix.target }} $compile_features $compile_compress
+          ./build-release -t ${{ matrix.target }} $compile_features $compile_compress
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.target }}
           path: build/release/*
@@ -69,13 +64,14 @@ jobs:
       BUILD_EXTRA_FEATURES: "local-redir local-tun"
       RUST_BACKTRACE: full
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest]
         target:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Install GNU tar
         if: runner.os == 'macOS'
@@ -85,13 +81,12 @@ jobs:
           echo "/usr/local/opt/gnu-tar/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          target: ${{ matrix.target }}
-          toolchain: stable
-          default: true
-          override: true
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+          rustup override set stable
+          rustup target add --toolchain stable ${{ matrix.target }}
 
       - name: Build release
         shell: bash
@@ -99,7 +94,7 @@ jobs:
           ./build/build-host-release -t ${{ matrix.target }}
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.target }}
           path: build/release/*
@@ -110,22 +105,21 @@ jobs:
       RUSTFLAGS: "-C target-feature=+crt-static"
       RUST_BACKTRACE: full
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          default: true
-          override: true
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+          rustup override set stable
 
       - name: Build release
         run: |
           pwsh ./build/build-host-release.ps1
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: windows-native
           path: build/release/*
