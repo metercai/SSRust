@@ -41,7 +41,6 @@
 //!
 //! These defined server will be used with a load balancing algorithm.
 
-use base64::Engine as _;
 use std::{
     borrow::Cow,
     convert::{From, Infallible},
@@ -67,14 +66,7 @@ use serde::{Deserialize, Serialize};
 use shadowsocks::relay::socks5::Address;
 use shadowsocks::{
     config::{
-        ManagerAddr,
-        Mode,
-        ReplayAttackPolicy,
-        ServerAddr,
-        ServerConfig,
-        ServerUser,
-        ServerUserManager,
-        ServerWeight,
+        ManagerAddr, Mode, ReplayAttackPolicy, ServerAddr, ServerConfig, ServerUser, ServerUserManager, ServerWeight,
     },
     crypto::CipherKind,
     plugin::PluginConfig,
@@ -149,6 +141,8 @@ struct SSConfig {
     plugin_opts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     plugin_args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_mode: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout: Option<u64>,
@@ -168,10 +162,14 @@ struct SSConfig {
     dns: Option<SSDnsConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    dns_cache_size: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     no_delay: Option<bool>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     keep_alive: Option<u64>,
 
@@ -186,6 +184,9 @@ struct SSConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     fast_open: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mptcp: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -275,6 +276,9 @@ struct SSLocalExtConfig {
     #[cfg(feature = "local-tun")]
     #[serde(skip_serializing_if = "Option::is_none")]
     tun_interface_address: Option<String>,
+    #[cfg(feature = "local-tun")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tun_interface_destination: Option<String>,
     #[cfg(all(feature = "local-tun", unix))]
     #[serde(skip_serializing_if = "Option::is_none")]
     tun_device_fd_from_path: Option<String>,
@@ -320,6 +324,8 @@ struct SSServerExtConfig {
     plugin_opts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     plugin_args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_mode: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout: Option<u64>,
@@ -632,20 +638,15 @@ impl FromStr for ManagerServerHost {
 }
 
 /// Mode of Manager's server
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum ManagerServerMode {
     /// Run shadowsocks server in the same process of manager
+    #[default]
     Builtin,
 
     /// Run shadowsocks server in standalone (process) mode
     #[cfg(unix)]
     Standalone,
-}
-
-impl Default for ManagerServerMode {
-    fn default() -> ManagerServerMode {
-        ManagerServerMode::Builtin
-    }
 }
 
 /// Parsing ManagerServerMode error
@@ -731,8 +732,9 @@ impl ManagerConfig {
 }
 
 /// Protocol of local server
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub enum ProtocolType {
+    #[default]
     Socks,
     #[cfg(feature = "local-http")]
     Http,
@@ -744,12 +746,6 @@ pub enum ProtocolType {
     Dns,
     #[cfg(feature = "local-tun")]
     Tun,
-}
-
-impl Default for ProtocolType {
-    fn default() -> ProtocolType {
-        ProtocolType::Socks
-    }
 }
 
 impl ProtocolType {
@@ -857,6 +853,11 @@ pub struct LocalConfig {
     /// Sending DNS query through proxy to this address
     #[cfg(feature = "local-dns")]
     pub remote_dns_addr: Option<Address>,
+    // client cache size
+    // if a lot of `create connection` observed in log,
+    // increase the size
+    #[cfg(feature = "local-dns")]
+    pub client_cache_size: Option<usize>,
 
     /// Tun interface's name
     ///
@@ -867,6 +868,9 @@ pub struct LocalConfig {
     /// Tun interface's address and netmask
     #[cfg(feature = "local-tun")]
     pub tun_interface_address: Option<IpNet>,
+    /// Tun interface's destination address and netmask
+    #[cfg(feature = "local-tun")]
+    pub tun_interface_destination: Option<IpNet>,
     /// Tun interface's file descriptor
     #[cfg(all(feature = "local-tun", unix))]
     pub tun_device_fd: Option<std::os::unix::io::RawFd>,
@@ -885,12 +889,20 @@ pub struct LocalConfig {
 impl LocalConfig {
     /// Create a new `LocalConfig`
     pub fn new(protocol: ProtocolType) -> LocalConfig {
+        // DNS server runs in `TcpAndUdp` mode by default to maintain backwards compatibility
+        // see https://github.com/shadowsocks/shadowsocks-rust/issues/1281
+        let mode = match protocol {
+            #[cfg(feature = "local-dns")]
+            ProtocolType::Dns => Mode::TcpAndUdp,
+            _ => Mode::TcpOnly,
+        };
+
         LocalConfig {
             addr: None,
 
             protocol,
 
-            mode: Mode::TcpOnly,
+            mode,
             udp_addr: None,
 
             #[cfg(feature = "local-tunnel")]
@@ -905,11 +917,15 @@ impl LocalConfig {
             local_dns_addr: None,
             #[cfg(feature = "local-dns")]
             remote_dns_addr: None,
+            #[cfg(feature = "local-dns")]
+            client_cache_size: None,
 
             #[cfg(feature = "local-tun")]
             tun_interface_name: None,
             #[cfg(feature = "local-tun")]
             tun_interface_address: None,
+            #[cfg(feature = "local-tun")]
+            tun_interface_destination: None,
             #[cfg(all(feature = "local-tun", unix))]
             tun_device_fd: None,
             #[cfg(all(feature = "local-tun", unix))]
@@ -1001,19 +1017,14 @@ impl LocalConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum DnsConfig {
+    #[default]
     System,
     #[cfg(feature = "trust-dns")]
     TrustDns(ResolverConfig),
     #[cfg(feature = "local-dns")]
     LocalDns(NameServerAddr),
-}
-
-impl Default for DnsConfig {
-    fn default() -> DnsConfig {
-        DnsConfig::System
-    }
 }
 
 /// Security Config
@@ -1099,6 +1110,7 @@ pub struct Config {
     /// - `cloudflare`, `cloudflare_tls`, `cloudflare_https`
     /// - `quad9`, `quad9_tls`
     pub dns: DnsConfig,
+    pub dns_cache_size: Option<usize>,
     /// Uses IPv6 addresses first
     ///
     /// Set to `true` if you want to query IPv6 addresses before IPv4
@@ -1116,6 +1128,8 @@ pub struct Config {
     ///
     /// If this is not set, sockets will be set with a default timeout
     pub keep_alive: Option<Duration>,
+    /// Multipath-TCP
+    pub mptcp: bool,
 
     /// `RLIMIT_NOFILE` option for *nix systems
     #[cfg(all(unix, not(target_os = "android")))]
@@ -1247,12 +1261,14 @@ impl Config {
             local: Vec::new(),
 
             dns: DnsConfig::default(),
+            dns_cache_size: None,
             ipv6_first: false,
             ipv6_only: false,
 
             no_delay: false,
             fast_open: false,
             keep_alive: None,
+            mptcp: false,
 
             #[cfg(all(unix, not(target_os = "android")))]
             nofile: None,
@@ -1448,7 +1464,15 @@ impl Config {
                                 }
                             },
                             None => {
-                                local_config.mode = global_mode;
+                                // DNS server runs in `TcpAndUdp` mode by default to maintain backwards compatibility
+                                // see https://github.com/shadowsocks/shadowsocks-rust/issues/1281
+                                let mode = match protocol {
+                                    #[cfg(feature = "local-dns")]
+                                    ProtocolType::Dns => Mode::TcpAndUdp,
+                                    _ => global_mode,
+                                };
+
+                                local_config.mode = mode;
                             }
                         }
 
@@ -1632,6 +1656,20 @@ impl Config {
                             plugin: p.clone(),
                             plugin_opts: config.plugin_opts.clone(),
                             plugin_args: config.plugin_args.clone().unwrap_or_default(),
+                            plugin_mode: match config.plugin_mode {
+                                None => Mode::TcpOnly,
+                                Some(ref mode) => match mode.parse::<Mode>() {
+                                    Ok(m) => m,
+                                    Err(..) => {
+                                        let e = Error::new(
+                                            ErrorKind::Malformed,
+                                            "malformed `plugin_mode`, must be one of `tcp_only`, `udp_only` and `tcp_and_udp`",
+                                            None,
+                                        );
+                                        return Err(e);
+                                    }
+                                },
+                            },
                         };
                         nsvr.set_plugin(plugin);
                     }
@@ -1717,8 +1755,8 @@ impl Config {
                     let mut user_manager = ServerUserManager::new();
 
                     for user in users {
-                        let key = match base64::engine::general_purpose::STANDARD.decode(&user.password) {
-                            Ok(k) => k,
+                        let user = match ServerUser::with_encoded_key(user.name, &user.password) {
+                            Ok(u) => u,
                             Err(..) => {
                                 let err = Error::new(
                                     ErrorKind::Malformed,
@@ -1729,7 +1767,7 @@ impl Config {
                             }
                         };
 
-                        user_manager.add_user(ServerUser::new(user.name, key));
+                        user_manager.add_user(user);
                     }
 
                     nsvr.set_user_manager(user_manager);
@@ -1759,6 +1797,20 @@ impl Config {
                             plugin: p,
                             plugin_opts: svr.plugin_opts,
                             plugin_args: svr.plugin_args.unwrap_or_default(),
+                            plugin_mode: match svr.plugin_mode {
+                                None => Mode::TcpOnly,
+                                Some(ref mode) => match mode.parse::<Mode>() {
+                                    Ok(m) => m,
+                                    Err(..) => {
+                                        let e = Error::new(
+                                            ErrorKind::Malformed,
+                                            "malformed `plugin_mode`, must be one of `tcp_only`, `udp_only` and `tcp_and_udp`",
+                                            None,
+                                        );
+                                        return Err(e);
+                                    }
+                                },
+                            },
                         };
                         nsvr.set_plugin(plugin);
                     }
@@ -1875,6 +1927,20 @@ impl Config {
                         plugin: p,
                         plugin_opts: config.plugin_opts,
                         plugin_args: config.plugin_args.unwrap_or_default(),
+                        plugin_mode: match config.plugin_mode {
+                            None => Mode::TcpOnly,
+                            Some(ref mode) => match mode.parse::<Mode>() {
+                                Ok(m) => m,
+                                Err(..) => {
+                                    let e = Error::new(
+                                        ErrorKind::Malformed,
+                                        "malformed `plugin_mode`, must be one of `tcp_only`, `udp_only` and `tcp_and_udp`",
+                                        None,
+                                    );
+                                    return Err(e);
+                                }
+                            },
+                        },
                     });
                 }
             }
@@ -1890,6 +1956,7 @@ impl Config {
                 Some(SSDnsConfig::TrustDns(c)) => nconfig.dns = DnsConfig::TrustDns(c),
                 None => nconfig.dns = DnsConfig::System,
             }
+            nconfig.dns_cache_size = config.dns_cache_size;
         }
 
         // TCP nodelay
@@ -1905,6 +1972,11 @@ impl Config {
         // TCP Keep-Alive
         if let Some(d) = config.keep_alive {
             nconfig.keep_alive = Some(Duration::from_secs(d));
+        }
+
+        // Multipath-TCP
+        if let Some(b) = config.mptcp {
+            nconfig.mptcp = b;
         }
 
         // UDP
@@ -2093,26 +2165,12 @@ impl Config {
             };
 
             if protocol.enable_udp() {
-                c.add_name_server(NameServerConfig {
-                    socket_addr,
-                    protocol: Protocol::Udp,
-                    tls_dns_name: None,
-                    trust_nx_responses: false,
-                    #[cfg(any(feature = "dns-over-tls", feature = "dns-over-https"))]
-                    tls_config: None,
-                    bind_addr: None,
-                });
+                let ns_config = NameServerConfig::new(socket_addr, Protocol::Udp);
+                c.add_name_server(ns_config);
             }
             if protocol.enable_tcp() {
-                c.add_name_server(NameServerConfig {
-                    socket_addr,
-                    protocol: Protocol::Tcp,
-                    tls_dns_name: None,
-                    trust_nx_responses: false,
-                    #[cfg(any(feature = "dns-over-tls", feature = "dns-over-https"))]
-                    tls_config: None,
-                    bind_addr: None,
-                });
+                let ns_config = NameServerConfig::new(socket_addr, Protocol::Tcp);
+                c.add_name_server(ns_config);
             }
         }
 
@@ -2403,6 +2461,8 @@ impl fmt::Display for Config {
                         tun_interface_name: local.tun_interface_name.clone(),
                         #[cfg(feature = "local-tun")]
                         tun_interface_address: local.tun_interface_address.as_ref().map(ToString::to_string),
+                        #[cfg(feature = "local-tun")]
+                        tun_interface_destination: local.tun_interface_destination.as_ref().map(ToString::to_string),
                         #[cfg(all(feature = "local-tun", unix))]
                         tun_device_fd_from_path: local
                             .tun_device_fd_from_path
@@ -2454,6 +2514,13 @@ impl fmt::Display for Config {
                         Some(p.plugin_args.clone())
                     }
                 });
+                jconf.plugin_mode = match svr.plugin() {
+                    None => None,
+                    Some(p) => match p.plugin_mode {
+                        Mode::TcpOnly => None,
+                        _ => Some(p.plugin_mode.to_string()),
+                    },
+                };
                 jconf.timeout = svr.timeout().map(|t| t.as_secs());
                 jconf.mode = Some(svr.mode().to_string());
 
@@ -2488,7 +2555,7 @@ impl fmt::Display for Config {
                             for u in m.users_iter() {
                                 vu.push(SSServerUserConfig {
                                     name: u.name().to_owned(),
-                                    password: base64::engine::general_purpose::STANDARD.encode(u.key()),
+                                    password: u.encoded_key(),
                                 });
                             }
                             vu
@@ -2503,6 +2570,13 @@ impl fmt::Display for Config {
                                 Some(p.plugin_args.clone())
                             }
                         }),
+                        plugin_mode: match svr.plugin() {
+                            None => None,
+                            Some(p) => match p.plugin_mode {
+                                Mode::TcpOnly => None,
+                                _ => Some(p.plugin_mode.to_string()),
+                            },
+                        },
                         timeout: svr.timeout().map(|t| t.as_secs()),
                         remarks: svr.remarks().map(ToOwned::to_owned),
                         id: svr.id().map(ToOwned::to_owned),
@@ -2576,6 +2650,10 @@ impl fmt::Display for Config {
 
         if let Some(keepalive) = self.keep_alive {
             jconf.keep_alive = Some(keepalive.as_secs());
+        }
+
+        if self.mptcp {
+            jconf.mptcp = Some(self.mptcp);
         }
 
         match self.dns {
